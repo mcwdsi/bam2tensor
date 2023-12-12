@@ -1,0 +1,22 @@
+{
+  "_copy_without_render": [
+    "*.rst_t"
+  ],
+  "_jinja2_env_vars": {
+    "lstrip_blocks": true,
+    "trim_blocks": true
+  },
+  "_template": "https://github.com/statisticsnorway/ssb-pypitemplate.git",
+  "author": "Nick Semenkovich",
+  "code_quality_level": "Low",
+  "copyright_owner": "Nick Semenkovich",
+  "copyright_year": "2023",
+  "development_status": "Development Status :: 1 - Planning",
+  "email": "semenko@alum.mit.edu",
+  "friendly_name": "Bam2Tensor",
+  "github_organization": "mcwdsi",
+  "license": "MIT",
+  "package_name": "bam2tensor",
+  "project_name": "bam2tensor",
+  "version": "0.0.1"
+}
