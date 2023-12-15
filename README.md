@@ -54,7 +54,7 @@ Please see the [Reference Guide] for full details.
 
 ## Data Structure
 
-One `.npz` file is generated for each separate `.bam`, which can be loaded using `scipy.sparse.load_npz()`. Each `.npz` file contains a single sparse SciPy [COO matrix]. 
+One `.npz` file is generated for each separate `.bam`, which can be loaded using `scipy.sparse.load_npz()`. Each `.npz` file contains a single sparse SciPy [COO matrix].
 
 In the COO matrix, each row represents a read and each column represents a CpG site. The value at each row/column is the methylation state (`0` = unmethylated, `1` = methylated, `-1` = no data). Note that `-1` can represent indels or point mutations.
 
@@ -97,4 +97,3 @@ This project was generated from [Statistics Norway]'s [SSB PyPI Template].
 [license]: https://github.com/mcwdsi/bam2tensor/blob/main/LICENSE
 [contributor guide]: https://github.com/mcwdsi/bam2tensor/blob/main/CONTRIBUTING.md
 [reference guide]: https://mcwdsi.github.io/bam2tensor/reference.html
-q
