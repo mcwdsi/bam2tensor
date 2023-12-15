@@ -25,13 +25,20 @@
 [black]: https://github.com/psf/black
 [poetry]: https://python-poetry.org/
 
-## Features
+bam2tensor is a Python package for converting .bam files to dense representations of methylation data (as .npz NumPy arrays). It is designed to evaluate all CpG sites and store methylation states for loading into other deep learning pipelines.
 
-- TODO
+## Features
+- Parses .bam files using [pysam](https://github.com/pysam-developers/pysam)
+- Extracts methylation data from all CpG sites
+- Easily parallelizable
+- Supports any genome (Hg38, T2T-CHM13, mm10, etc.)
+- Stores methylation data as .npz NumPy arrays
+- Stores data in sparse format (COO matrix) for efficient loading
 
 ## Requirements
 
-- TODO
+- Python 3.8+
+- pysam, numpy, scipy, tqdm
 
 ## Installation
 
@@ -47,13 +54,12 @@ Please see the [Reference Guide] for details.
 
 ## Contributing
 
-Contributions are very welcome.
-To learn more, see the [Contributor Guide].
+Contributions are welcome! Please see the [Contributor Guide].
 
 ## License
 
 Distributed under the terms of the [MIT license][license],
-_Bam2Tensor_ is free and open source software.
+_Bam2Tensor_ is free and open source.
 
 ## Issues
 
@@ -62,8 +68,12 @@ please [file an issue] along with a detailed description.
 
 ## Credits
 
+This project is developed and maintained by [Nick Semenkovich (@semenko)], as part of the Medical College of Wisconsin's [Data Science Institute].
+
 This project was generated from [Statistics Norway]'s [SSB PyPI Template].
 
+[Nick Semenkovich (@semenko)]: https://nick.semenkovich.com/
+[Data Science Institute]: https://www.mcw.edu/departments/data-science-institute
 [statistics norway]: https://www.ssb.no/en
 [pypi]: https://pypi.org/
 [ssb pypi template]: https://github.com/statisticsnorway/ssb-pypitemplate
