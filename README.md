@@ -30,10 +30,10 @@ bam2tensor is a Python package for converting .bam files to dense representation
 ## Features
 - Parses .bam files using [pysam](https://github.com/pysam-developers/pysam)
 - Extracts methylation data from all CpG sites
-- Easily parallelizable
 - Supports any genome (Hg38, T2T-CHM13, mm10, etc.)
-- Stores methylation data as .npz NumPy arrays
 - Stores data in sparse format (COO matrix) for efficient loading
+- Exports methylation data to .npz NumPy arrays
+- Easily parallelizable
 
 ## Requirements
 
@@ -50,7 +50,18 @@ pip install bam2tensor
 
 ## Usage
 
-Please see the [Reference Guide] for details.
+Please see the [Reference Guide] for full details.
+
+## Data Structure
+
+One `.npz` file is generated for each separate `.bam`, which can be loaded using `scipy.sparse.load_npz()`. Each `.npz` file contains a single sparse SciPy [COO matrix]. 
+
+In the COO matrix, each row represents a read and each column represents a CpG site. The value at each row/column is the methylation state (`0` = unmethylated, `1` = methylated, `-1` = no data). Note that `-1` can represent indels or point mutations.
+
+## Todo
+- Consider storing a Read ID: Row ID mapping?
+- Export / more stably store & import embedding mapping? (.npz or other instead of .json?)
+- Store metadata / object reference in .npz file?
 
 ## Contributing
 
@@ -79,9 +90,11 @@ This project was generated from [Statistics Norway]'s [SSB PyPI Template].
 [ssb pypi template]: https://github.com/statisticsnorway/ssb-pypitemplate
 [file an issue]: https://github.com/mcwdsi/bam2tensor/issues
 [pip]: https://pip.pypa.io/
+[COO matrix]: https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.coo_matrix.html
 
 <!-- github-only -->
 
 [license]: https://github.com/mcwdsi/bam2tensor/blob/main/LICENSE
 [contributor guide]: https://github.com/mcwdsi/bam2tensor/blob/main/CONTRIBUTING.md
 [reference guide]: https://mcwdsi.github.io/bam2tensor/reference.html
+q
