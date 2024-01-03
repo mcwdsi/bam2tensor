@@ -1,4 +1,4 @@
-# Bam2Tensor
+# bam2tensor
 
 [![PyPI](https://img.shields.io/pypi/v/bam2tensor.svg)][pypi status]
 [![Status](https://img.shields.io/pypi/status/bam2tensor.svg)][pypi status]
@@ -42,7 +42,7 @@ bam2tensor is a Python package for converting .bam files to dense representation
 
 ## Installation
 
-You can install _Bam2Tensor_ via [pip] from [PyPI]:
+You can install _bam2tensor_ via [pip] from [PyPI]:
 
 ```console
 pip install bam2tensor
@@ -70,7 +70,7 @@ Contributions are welcome! Please see the [Contributor Guide].
 ## License
 
 Distributed under the terms of the [MIT license][license],
-_Bam2Tensor_ is free and open source.
+_bam2tensor_ is free and open source.
 
 ## Issues
 
