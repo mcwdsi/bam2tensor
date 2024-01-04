@@ -54,14 +54,14 @@ from bam2tensor.functions import (
 # @click.option("--output-file", help="Output file. Default is to use the extension .methylation.npz. (Only available for single .bam file input.)", default=None)
 @click.option("--overwrite", help="Overwrite output file if it exists.", is_flag=True)
 def main(
-    input_path,
-    reference_fasta,
-    quality_limit,
-    window_size,
-    verbose,
-    skip_cache,
-    debug,
-    overwrite,
+    input_path: str,
+    reference_fasta: str,
+    quality_limit: int,
+    window_size: int,
+    verbose: bool,
+    skip_cache: bool,
+    debug: bool,
+    overwrite: bool,
 ) -> None:
     """Bam2Tensor."""
     time_start = time.time()

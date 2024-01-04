@@ -50,7 +50,9 @@ CHROMOSOMES = ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
 CHROMOSOMES_DICT = {ch: idx for idx, ch in enumerate(CHROMOSOMES)}
 
 
-def get_cpg_sites_from_fasta(reference_fasta, verbose=False, skip_cache=False) -> dict:
+def get_cpg_sites_from_fasta(
+    reference_fasta: str, verbose: bool = False, skip_cache: bool = False
+) -> dict:
     """
     Generate a dict of *all* CpG sites across each chromosome in the reference genome.
 
@@ -129,7 +131,11 @@ def get_cpg_sites_from_fasta(reference_fasta, verbose=False, skip_cache=False) -
 
 # TODO: Ponder this window size, as aligned reads might be larger by a bit... Is this useful?
 def get_windowed_cpg_sites(
-    reference_fasta, cpg_sites_dict, window_size, verbose=False, skip_cache=False
+    reference_fasta: str,
+    cpg_sites_dict: dict,
+    window_size: int,
+    verbose: bool = False,
+    skip_cache: bool = False,
 ) -> tuple:
     """
     Generate a dict of CpG sites for each chromosome in the reference genome.
@@ -257,7 +263,10 @@ def get_windowed_cpg_sites(
 # TODO: Object orient this input / simplify the input?
 # TODO: Ingest chr_to_cpg_to_embedding_dict instead?
 def embedding_to_genomic_position(
-    total_cpg_sites, cpg_sites_dict, cpgs_per_chr_cumsum, embedding_pos
+    total_cpg_sites: int,
+    cpg_sites_dict: dict,
+    cpgs_per_chr_cumsum: np.array,
+    embedding_pos: int,
 ) -> tuple:
     """
     Given an embedding position, return the chromosome and position.
@@ -291,7 +300,10 @@ def embedding_to_genomic_position(
 
 # TODO: Object orient this input / simplify the input?
 def genomic_position_to_embedding(
-    chr_to_cpg_to_embedding_dict, cpgs_per_chr_cumsum, chrom, pos
+    chr_to_cpg_to_embedding_dict: dict,
+    cpgs_per_chr_cumsum: np.array,
+    chrom: int,
+    pos: int,
 ) -> int:
     """
     Given a genomic position, return the embedding position.
@@ -320,15 +332,15 @@ def genomic_position_to_embedding(
 
 
 def extract_methylation_data_from_bam(
-    input_bam,
-    total_cpg_sites,
-    chr_to_cpg_to_embedding_dict,
-    cpgs_per_chr_cumsum,
-    windowed_cpg_sites_dict,
-    windowed_cpg_sites_dict_reverse,
-    quality_limit=0,
-    verbose=False,
-    debug=False,
+    input_bam: str,
+    total_cpg_sites: int,
+    chr_to_cpg_to_embedding_dict: dict,
+    cpgs_per_chr_cumsum: np.array,
+    windowed_cpg_sites_dict: dict,
+    windowed_cpg_sites_dict_reverse: dict,
+    quality_limit: int = 0,
+    verbose: bool = False,
+    debug: bool = False,
 ) -> scipy.sparse.coo_matrix:
     """
     Extract methylation data from a .bam file.
