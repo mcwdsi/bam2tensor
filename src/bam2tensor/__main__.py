@@ -9,7 +9,7 @@ import numpy as np
 import scipy.sparse
 
 
-from functions import (
+from bam2tensor.functions import (
     get_cpg_sites_from_fasta,
     get_windowed_cpg_sites,
     extract_methylation_data_from_bam,
