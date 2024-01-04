@@ -53,8 +53,7 @@ CHROMOSOMES_DICT = {ch: idx for idx, ch in enumerate(CHROMOSOMES)}
 def get_cpg_sites_from_fasta(
     reference_fasta: str, verbose: bool = False, skip_cache: bool = False
 ) -> dict[str, list[int]]:
-    """
-    Generate a dict of *all* CpG sites across each chromosome in the reference genome.
+    """Generate a dict of *all* CpG sites across each chromosome in the reference genome.
 
     This is a dict of lists, where the key is the chromosome: e.g. "chr1"
     The value is a list of CpG sites: e.g. [0, 35, 190, 212, 1055, ...]
@@ -62,11 +61,12 @@ def get_cpg_sites_from_fasta(
     We store this as a dict because it's easier to portably serialize to disk as JSON.
 
     Args:
-        reference_fasta (str): Path to the reference genome .fa file.
-        verbose (bool): Print verbose output.
-        skip_cache (bool): Ignore any cached files (slow!).
+        reference_fasta: Path to the reference genome fa file.
+        verbose: Print verbose output.
+        skip_cache: Ignore any cached files (slow!).
+
     Returns:
-        cpg_sites_dict (dict): A dict of CpG sites for each chromosome in the reference genome.
+        cpg_sites_dict: A dict of CpG sites for each chromosome in the reference genome.
     """
     # TODO: Store hash/metadata / reference file info, etc.?
     cached_cpg_sites_json = os.path.splitext(reference_fasta)[0] + ".cpg_all_sites.json"
@@ -137,8 +137,7 @@ def get_windowed_cpg_sites(
     verbose: bool = False,
     skip_cache: bool = False,
 ) -> tuple:
-    """
-    Generate a dict of CpG sites for each chromosome in the reference genome.
+    """Generate a dict of CpG sites for each chromosome in the reference genome.
 
     This is a dict of lists, where but each list contains a tuple of CpG ranges witin a window
     The key is the chromosome: e.g. "chr1"
@@ -152,8 +151,10 @@ def get_windowed_cpg_sites(
     Args:
         reference_fasta (str): Path to the reference genome .fa file.
         window_size (int): Size of the window to use.
+        cpg_sites_dict: A dict of CpG sites for each chromosome in the reference genome.
         verbose (bool): Print verbose output.
         skip_cache (bool): Ignore any cached files (slow!).
+
     Returns:
         windowed_cpg_sites_dict (dict): A dict of CpG sites for each chromosome in the reference genome.
         windowed_cpg_sites_dict_reverse (dict): A dict of each per-window CpG site. # TODO: Clarify this & rename var?
