@@ -52,7 +52,7 @@ CHROMOSOMES_DICT = {ch: idx for idx, ch in enumerate(CHROMOSOMES)}
 
 def get_cpg_sites_from_fasta(
     reference_fasta: str, verbose: bool = False, skip_cache: bool = False
-) -> dict:
+) -> dict[str, list[int]]:
     """
     Generate a dict of *all* CpG sites across each chromosome in the reference genome.
 
@@ -96,7 +96,7 @@ def get_cpg_sites_from_fasta(
 
     # Iterate over sequences
     for seqrecord in tqdm(
-        SeqIO.parse(reference_fasta, "fasta"),
+        SeqIO.parse(reference_fasta, "fasta"),  # type: ignore
         total=len(CHROMOSOMES),
         disable=not verbose,
     ):
