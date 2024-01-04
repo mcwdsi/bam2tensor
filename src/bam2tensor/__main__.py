@@ -64,9 +64,6 @@ def main(
     overwrite,
 ) -> None:
     """Bam2Tensor."""
-    print("hello world")
-
-    return
     time_start = time.time()
     # Print run information
     if verbose:
