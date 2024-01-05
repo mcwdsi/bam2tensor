@@ -134,10 +134,10 @@ def main(
     }
 
     # Count the number of CpGs per chromosome
-    cpgs_per_chr = {k: len(v) for k, v in cpg_sites_dict.items()}
+    cpgs_per_chr: dict[str, int] = {k: len(v) for k, v in cpg_sites_dict.items()}
 
     # Add up the number of CpGs per chromosome, e.g. chr1, then chr1+chr2, then chr1+chr2+chr3, etc
-    cpgs_per_chr_cumsum = np.cumsum([cpgs_per_chr[k] for k in CHROMOSOMES])
+    cpgs_per_chr_cumsum: np.ndarray = np.cumsum([cpgs_per_chr[k] for k in CHROMOSOMES])
 
     # TODO: Move these into to a formal test framework
     # TODO: Simplify the input framework (likely object orient the window / cpg dict?)

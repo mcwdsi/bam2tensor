@@ -77,10 +77,12 @@ def get_cpg_sites_from_fasta(
     if os.path.exists(cached_cpg_sites_json) and not skip_cache:
         if verbose:
             print(f"\tLoading all CpG sites from cache: {cached_cpg_sites_json}")
+        # TODO: Add type hinting via TypedDicts?
+        # e.g. https://stackoverflow.com/questions/51291722/define-a-jsonable-type-using-mypy-pep-526
         with open(cached_cpg_sites_json, "r", encoding="utf-8") as f:
             cpg_sites_dict = json.load(f)
 
-        return cpg_sites_dict
+        return cpg_sites_dict  # type: ignore
 
     if verbose:
         print(
@@ -92,7 +94,7 @@ def get_cpg_sites_from_fasta(
     # Each chromosome is identified with a line starting with ">" followed by the chromosome name
 
     # Store the CpG sites in a dict per chromosome
-    cpg_sites_dict = {}
+    cpg_sites_dict: dict[str, list[int]] = {}
 
     # Iterate over sequences
     for seqrecord in tqdm(
@@ -126,13 +128,13 @@ def get_cpg_sites_from_fasta(
     with open(cached_cpg_sites_json, "w", encoding="utf-8") as f:
         json.dump(cpg_sites_dict, f)
 
-    return cpg_sites_dict
+    return cpg_sites_dict  # type: ignore
 
 
 # TODO: Ponder this window size, as aligned reads might be larger by a bit... Is this useful?
 def get_windowed_cpg_sites(
     reference_fasta: str,
-    cpg_sites_dict: dict,
+    cpg_sites_dict: dict[str, list[int]],
     window_size: int,
     verbose: bool = False,
     skip_cache: bool = False,
@@ -265,10 +267,10 @@ def get_windowed_cpg_sites(
 # TODO: Ingest chr_to_cpg_to_embedding_dict instead?
 def embedding_to_genomic_position(
     total_cpg_sites: int,
-    cpg_sites_dict: dict,
+    cpg_sites_dict: dict[str, list[int]],
     cpgs_per_chr_cumsum: np.array,
     embedding_pos: int,
-) -> tuple:
+) -> tuple[str, int]:
     """
     Given an embedding position, return the chromosome and position.
 
@@ -303,7 +305,7 @@ def embedding_to_genomic_position(
 def genomic_position_to_embedding(
     chr_to_cpg_to_embedding_dict: dict,
     cpgs_per_chr_cumsum: np.array,
-    chrom: int,
+    chrom: str,
     pos: int,
 ) -> int:
     """
@@ -311,6 +313,8 @@ def genomic_position_to_embedding(
 
     Parameters
     ----------
+    chr_to_cpg_to_embedding_dict : dict
+    cpgs_per_chr_cumsum : np.array
     chrom : str
         The chromosome, e.g. "chr1"
     pos : int
