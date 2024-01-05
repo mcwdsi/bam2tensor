@@ -68,6 +68,13 @@ def get_cpg_sites_from_fasta(
     Returns:
         cpg_sites_dict: A dict of CpG sites for each chromosome in the reference genome.
     """
+    # We want a list of all CpG sites in the reference genome, including the chromosome and position
+    # We'll use this to define our embedding size
+    # Each chromosome is identified with a line starting with ">" followed by the chromosome name
+
+    # Store the CpG sites in a dict per chromosome
+    cpg_sites_dict: dict[str, list[int]] = {}
+
     # TODO: Store hash/metadata / reference file info, etc.?
     cached_cpg_sites_json = os.path.splitext(reference_fasta)[0] + ".cpg_all_sites.json"
 
@@ -88,13 +95,6 @@ def get_cpg_sites_from_fasta(
         print(
             f"\tNo cache of all CpG sites found (or --skip-cache=True), generating from: {reference_fasta}"
         )
-
-    # We want a list of all CpG sites in the reference genome, including the chromosome and position
-    # We'll use this to define our embedding size
-    # Each chromosome is identified with a line starting with ">" followed by the chromosome name
-
-    # Store the CpG sites in a dict per chromosome
-    cpg_sites_dict: dict[str, list[int]] = {}
 
     # Iterate over sequences
     for seqrecord in tqdm(
@@ -128,7 +128,7 @@ def get_cpg_sites_from_fasta(
     with open(cached_cpg_sites_json, "w", encoding="utf-8") as f:
         json.dump(cpg_sites_dict, f)
 
-    return cpg_sites_dict  # type: ignore
+    return cpg_sites_dict
 
 
 # TODO: Ponder this window size, as aligned reads might be larger by a bit... Is this useful?
@@ -268,7 +268,7 @@ def get_windowed_cpg_sites(
 def embedding_to_genomic_position(
     total_cpg_sites: int,
     cpg_sites_dict: dict[str, list[int]],
-    cpgs_per_chr_cumsum: np.array,
+    cpgs_per_chr_cumsum: np.array,  # type: ignore
     embedding_pos: int,
 ) -> tuple[str, int]:
     """
@@ -297,14 +297,14 @@ def embedding_to_genomic_position(
             cpg_sites_dict[CHROMOSOMES[chr_index]][embedding_pos],
         )
     # Otherwise, subtract the length of the previous chromosomes from the embedding position
-    embedding_pos -= cpgs_per_chr_cumsum[chr_index - 1]
+    embedding_pos -= cpgs_per_chr_cumsum[chr_index - 1]  # type: ignore
     return CHROMOSOMES[chr_index], cpg_sites_dict[CHROMOSOMES[chr_index]][embedding_pos]
 
 
 # TODO: Object orient this input / simplify the input?
 def genomic_position_to_embedding(
     chr_to_cpg_to_embedding_dict: dict,
-    cpgs_per_chr_cumsum: np.array,
+    cpgs_per_chr_cumsum: np.array,  # type: ignore
     chrom: str,
     pos: int,
 ) -> int:
@@ -333,14 +333,14 @@ def genomic_position_to_embedding(
     if chr_index == 0:
         return cpg_index
     # Otherwise, add the length of the previous chromosomes to the CpG index
-    return cpg_index + cpgs_per_chr_cumsum[chr_index - 1]
+    return cpg_index + cpgs_per_chr_cumsum[chr_index - 1]  # type: ignore
 
 
 def extract_methylation_data_from_bam(
     input_bam: str,
     total_cpg_sites: int,
     chr_to_cpg_to_embedding_dict: dict,
-    cpgs_per_chr_cumsum: np.array,
+    cpgs_per_chr_cumsum: np.array,  # type: ignore
     windowed_cpg_sites_dict: dict,
     windowed_cpg_sites_dict_reverse: dict,
     quality_limit: int = 0,
@@ -401,7 +401,7 @@ def extract_methylation_data_from_bam(
                 if debug:
                     print(aligned_segment.query_name)
                     # Validity tests
-                    assert aligned_segment.is_mapped
+                    assert not aligned_segment.is_unmapped
                     assert aligned_segment.is_supplementary is False
                     assert aligned_segment.reference_start <= stop_pos
                     assert aligned_segment.reference_end >= start_pos
@@ -419,7 +419,7 @@ def extract_methylation_data_from_bam(
                         aligned_segment.query_name not in debug_read_name_to_row_number
                     )
                     debug_read_name_to_row_number[
-                        aligned_segment.query_name
+                        aligned_segment.query_name  # type: ignore
                         + ("_1" if aligned_segment.is_read1 else "_2")
                     ] = read_number
 
@@ -465,7 +465,7 @@ def extract_methylation_data_from_bam(
                 #   A methylated C will be *unchanged* and read as C (pair G)
                 #   An unmethylated C will be *changed* and read as T (pair A)
                 for query_pos, ref_pos in this_segment_cpgs:
-                    query_base = aligned_segment.query_sequence[query_pos]
+                    query_base = aligned_segment.query_sequence[query_pos]  # type: ignore
                     # query_base_raw = aligned_segment.get_forward_sequence()[query_pos] # raw off sequencer
                     # query_base_no_offset = aligned_segment.query_alignment_sequence[query_pos] # this needs to be offset by the soft clip
 
