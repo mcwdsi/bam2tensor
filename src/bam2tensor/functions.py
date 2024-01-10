@@ -45,7 +45,12 @@ def example_function(number1: int, number2: int) -> str:
 
 
 ## Globals
-CHROMOSOMES = ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
+HG38_CHROMOSOMES = ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
+MM39_CHROMOSOMES = ["chr" + str(i) for i in range(1, 20)] + ["chrX", "chrY"]
+TEST_CHROMOSOMES = ["chr1"]
+
+CHROMOSOMES = HG38_CHROMOSOMES
+
 # dict: {chromosome: index}, e.g. {"chr1": 0, "chr2": 1, ...}
 CHROMOSOMES_DICT = {ch: idx for idx, ch in enumerate(CHROMOSOMES)}
 
