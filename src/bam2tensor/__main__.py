@@ -81,7 +81,9 @@ def main(
         raise ValueError(f"Input path {input_path} is not a file or a directory.")
 
     if verbose:
-        print(f"Found {len(bams_to_process)} .bam file(s) to process.")
+        print(f"\nFound {len(bams_to_process)} .bam file(s) to process:")
+        for bam_file in bams_to_process:
+            print(f"\t{bam_file}")
 
     # Check input/output validity
     for bam_file in bams_to_process:
@@ -236,8 +238,8 @@ def main(
             debug=debug,
         )  # TODO: simplify these inputs!
 
-        # toarray allocates TiB of memory …
-        # assert len(methylation_data_coo.toarray()[0]) == total_cpg_sites
+        # Return validity test (TODO: move to the function itself?)
+        assert methylation_data_coo.shape[1] == total_cpg_sites
 
         if verbose:
             print(f"\nWriting methylation data to: {output_file}")

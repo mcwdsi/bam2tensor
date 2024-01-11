@@ -358,9 +358,13 @@ def extract_methylation_data_from_bam(
     Args:
 
     """
-    input_bam_object = pysam.AlignmentFile(
-        input_bam, "rb", require_index=True, threads=1
-    )
+    try:
+        input_bam_object = pysam.AlignmentFile(
+            input_bam, "rb", require_index=True, threads=1
+        )
+    except FileNotFoundError:
+        print(f"Index missing for bam file?: {input_bam}")
+        raise
 
     if verbose:
         print(f"\tTotal reads: {input_bam_object.mapped:,}\n")
