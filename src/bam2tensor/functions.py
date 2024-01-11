@@ -133,7 +133,7 @@ def get_cpg_sites_from_fasta(
 
     if verbose:
         print(f"\tSaving all cpg sites to cache: {cached_cpg_sites_json}")
-    with gzip.open(cached_cpg_sites_json, "wt", compresslevel=6, encoding="utf-8") as f:
+    with gzip.open(cached_cpg_sites_json, "wt", compresslevel=3, encoding="utf-8") as f:
         json.dump(cpg_sites_dict, f)
 
     return cpg_sites_dict
@@ -264,11 +264,11 @@ def get_windowed_cpg_sites(
         )
 
     with gzip.open(
-        windowed_cpg_sites_cache, "wt", compresslevel=6, encoding="utf-8"
+        windowed_cpg_sites_cache, "wt", compresslevel=3, encoding="utf-8"
     ) as f:
         json.dump(windowed_cpg_sites_dict, f)
     with gzip.open(
-        windowed_cpg_sites_reverse_cache, "wt", compresslevel=6, encoding="utf-8"
+        windowed_cpg_sites_reverse_cache, "wt", compresslevel=3, encoding="utf-8"
     ) as f:
         json.dump(windowed_cpg_sites_dict_reverse, f)
 
