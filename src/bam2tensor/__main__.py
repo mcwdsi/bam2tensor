@@ -18,8 +18,6 @@ from bam2tensor.functions import (
     CHROMOSOMES,
 )
 
-"""Command-line interface."""
-
 
 @click.command(
     help="Extract read-level methylation data from an aligned .bam file and export the data as a SciPy sparse matrix."
@@ -51,7 +49,6 @@ from bam2tensor.functions import (
     help="Debug mode (extensive validity checking + debug messages).",
     is_flag=True,
 )
-# @click.option("--output-file", help="Output file. Default is to use the extension .methylation.npz. (Only available for single .bam file input.)", default=None)
 @click.option("--overwrite", help="Overwrite output file if it exists.", is_flag=True)
 def main(
     input_path: str,
@@ -86,9 +83,6 @@ def main(
     if verbose:
         print(f"Found {len(bams_to_process)} .bam file(s) to process.")
 
-    # if output_file is None:
-    #    output_file = os.path.splitext(input_bam)[0] + ".methylation.npz"
-
     # Check input/output validity
     for bam_file in bams_to_process:
         assert os.access(bam_file, os.R_OK), f"Input file is not readable: {bam_file}"
@@ -114,6 +108,7 @@ def main(
             assert os.access(
                 os.path.dirname(os.path.abspath(output_file)), os.W_OK
             ), f"Output file path is not writable: {output_file}"
+
     # We need to obtain all cpg sites in the reference genome
     # NOTE: This can take a while (~10 minutes for GRCh38 if not cached)
     cpg_sites_dict = get_cpg_sites_from_fasta(
@@ -127,7 +122,7 @@ def main(
 
     assert total_cpg_sites > 28_000_000  # Validity check for hg38
 
-    # Create a dictionary of chromosome -> CpG site -> embedding index for efficient lookup
+    # Create a dictionary of chromosome -> CpG site -> index (embedding) for efficient lookup
     chr_to_cpg_to_embedding_dict = {
         ch: {cpg: idx for idx, cpg in enumerate(cpg_sites_dict[ch])}
         for ch in CHROMOSOMES
