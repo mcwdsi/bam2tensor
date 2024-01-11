@@ -3,6 +3,7 @@
 """
 
 # Imports
+import gzip
 import json
 import os
 
@@ -81,7 +82,9 @@ def get_cpg_sites_from_fasta(
     cpg_sites_dict: dict[str, list[int]] = {}
 
     # TODO: Store hash/metadata / reference file info, etc.?
-    cached_cpg_sites_json = os.path.splitext(reference_fasta)[0] + ".cpg_all_sites.json"
+    cached_cpg_sites_json = (
+        os.path.splitext(reference_fasta)[0] + ".cpg_all_sites.json.gz"
+    )
 
     if verbose:
         print(f"\nLoading all CpG sites for: {reference_fasta}")
@@ -91,7 +94,7 @@ def get_cpg_sites_from_fasta(
             print(f"\tLoading all CpG sites from cache: {cached_cpg_sites_json}")
         # TODO: Add type hinting via TypedDicts?
         # e.g. https://stackoverflow.com/questions/51291722/define-a-jsonable-type-using-mypy-pep-526
-        with open(cached_cpg_sites_json, "r", encoding="utf-8") as f:
+        with gzip.open(cached_cpg_sites_json, "rt") as f:
             cpg_sites_dict = json.load(f)
 
         return cpg_sites_dict  # type: ignore
@@ -130,7 +133,7 @@ def get_cpg_sites_from_fasta(
 
     if verbose:
         print(f"\tSaving all cpg sites to cache: {cached_cpg_sites_json}")
-    with open(cached_cpg_sites_json, "w", encoding="utf-8") as f:
+    with gzip.open(cached_cpg_sites_json, "wt", compresslevel=6, encoding="utf-8") as f:
         json.dump(cpg_sites_dict, f)
 
     return cpg_sites_dict
@@ -170,10 +173,10 @@ def get_windowed_cpg_sites(
     # Check if we have a cached version of our windowed cpg sites
     # TODO: Update caching to use a hash of the reference genome, window size, etc.
     windowed_cpg_sites_cache = (
-        os.path.splitext(reference_fasta)[0] + ".cpg_windowed_sites.json"
+        os.path.splitext(reference_fasta)[0] + ".cpg_windowed_sites.json.gz"
     )
     windowed_cpg_sites_reverse_cache = (
-        os.path.splitext(reference_fasta)[0] + ".cpg_windowed_sites_reverse.json"
+        os.path.splitext(reference_fasta)[0] + ".cpg_windowed_sites_reverse.json.gz"
     )
 
     if (
@@ -185,9 +188,9 @@ def get_windowed_cpg_sites(
             print(
                 f"\tLoading windowed CpG sites from caches:\n\t\t{windowed_cpg_sites_cache}\n\t\t{windowed_cpg_sites_reverse_cache}"
             )
-        with open(windowed_cpg_sites_cache, "r", encoding="utf-8") as f:
+        with gzip.open(windowed_cpg_sites_cache, "rt") as f:
             windowed_cpg_sites_dict = json.load(f)
-        with open(windowed_cpg_sites_reverse_cache, "r", encoding="utf-8") as f:
+        with gzip.open(windowed_cpg_sites_reverse_cache, "rt") as f:
             # This wild object_hook is to convert the keys back to integers, since JSON only supports strings as keys
             windowed_cpg_sites_dict_reverse = json.load(
                 f,
@@ -260,9 +263,13 @@ def get_windowed_cpg_sites(
             f"\tSaving windowed CpG sites to caches:\n\t\t{windowed_cpg_sites_cache}\n\t\t{windowed_cpg_sites_reverse_cache}"
         )
 
-    with open(windowed_cpg_sites_cache, "w", encoding="utf-8") as f:
+    with gzip.open(
+        windowed_cpg_sites_cache, "wt", compresslevel=6, encoding="utf-8"
+    ) as f:
         json.dump(windowed_cpg_sites_dict, f)
-    with open(windowed_cpg_sites_reverse_cache, "w", encoding="utf-8") as f:
+    with gzip.open(
+        windowed_cpg_sites_reverse_cache, "wt", compresslevel=6, encoding="utf-8"
+    ) as f:
         json.dump(windowed_cpg_sites_dict_reverse, f)
 
     return windowed_cpg_sites_dict, windowed_cpg_sites_dict_reverse
@@ -356,15 +363,26 @@ def extract_methylation_data_from_bam(
     Extract methylation data from a .bam file.
 
     Args:
+        input_bam: Path to the input .bam file.
+        total_cpg_sites: Total number of CpG sites in the reference genome.
+        chr_to_cpg_to_embedding_dict: A dict of dicts, where the key is the chromosome and the value is a dict of CpG sites.
+        cpgs_per_chr_cumsum: A numpy array of the cumulative sum of CpG sites per chromosome.
+        windowed_cpg_sites_dict: A dict of CpG sites for each chromosome in the reference genome.
+        windowed_cpg_sites_dict_reverse: A dict of each per-window CpG site.
+        quality_limit: Minimum mapping quality to include.
+        verbose: Print verbose output.
+        debug: Print debug output.
+
+    Returns:
+        A scipy.sparse.coo_matrix of the methylation data.
 
     """
     try:
         input_bam_object = pysam.AlignmentFile(
             input_bam, "rb", require_index=True, threads=1
         )
-    except FileNotFoundError:
-        print(f"Index missing for bam file?: {input_bam}")
-        raise
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Index missing for bam file?: {input_bam}") from exc
 
     if verbose:
         print(f"\tTotal reads: {input_bam_object.mapped:,}\n")
