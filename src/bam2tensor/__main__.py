@@ -8,6 +8,7 @@ import time
 import numpy as np
 import scipy.sparse
 
+from bam2tensor.embedding import GenomeMethylationEmbedding
 
 from bam2tensor.functions import (
     get_cpg_sites_from_fasta,
@@ -110,6 +111,15 @@ def main(
             assert os.access(
                 os.path.dirname(os.path.abspath(output_file)), os.W_OK
             ), f"Output file path is not writable: {output_file}"
+
+    # Create a new GenomeMethylationEmbedding object
+    genome_methylation_embedding = GenomeMethylationEmbedding(
+        genome_name="hg38",
+        fasta_source=reference_fasta,
+        expected_chromosomes=CHROMOSOMES,
+    )
+    print(genome_methylation_embedding)
+    return
 
     # We need to obtain all cpg sites in the reference genome
     # NOTE: This can take a while (~10 minutes for GRCh38 if not cached)
