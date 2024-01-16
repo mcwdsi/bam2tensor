@@ -31,28 +31,38 @@ class GenomeMethylationEmbedding:
     fasta_source = None
     expected_chromosomes = None
     embedding_loaded = False
-
     cpg_sites_dict = None
 
     def __init__(
         self,
         genome_name,
         expected_chromosomes,
-        fasta_source=None,
-        skip_cache=False,
-        verbose=False,
+        fasta_source: str = None,
+        skip_cache: bool = False,
+        verbose: bool = False,
     ):
         self.genome_name = genome_name
         self.fasta_source = fasta_source
         self.expected_chromosomes = expected_chromosomes
         self.verbose = verbose
+        self.window_size = 150
 
         # Store the CpG sites in a dict per chromosome
         self.cpg_sites_dict: dict[str, list[int]] = {}
 
         self.cached_cpg_sites_json = self.genome_name + ".cpg_all_sites.json.gz"
 
-        self.methylation_embedding = {}
+        self.windowed_cpg_sites_cache = self.genome_name + ".cpg_windowed_sites.json.gz"
+        # This is a dict of lists, where but each list contains a tuple of CpG ranges witin a window
+        # Key: chromosome, e.g. "chr1"
+        # Value: a list of tuples, e.g. [(0,35), (190,212), (1055,)]
+        self.windowed_cpg_sites_dict = {}
+
+        self.windowed_cpg_sites_reverse_cache = (
+            self.genome_name + ".cpg_windowed_sites_reverse.json.gz"
+        )
+        # And a reverse dict of dicts where chrom->window_start->[cpgs]
+        self.windowed_cpg_sites_dict_reverse = {}
 
         # TODO: Store the expected chromosomes in some cached object.
         # Check that the expected chromosomes are not empty
@@ -118,9 +128,15 @@ class GenomeMethylationEmbedding:
             raise FileNotFoundError("\tNo cache of all CpG sites found.")
 
     def parse_fasta_for_cpg_sites(self):
-        """Parse a fasta file for CpG sites.
+        """Generate a dict of *all* CpG sites across each chromosome in the reference genome.
 
-        Obtain all cpg sites in the reference genome - this can take a while (~10 minutes for GRCh38).
+        This can take a while (~10 minutes for GRCh38).
+
+        This generates cpg_sites_dict: A dict of CpG sites for each chromosome in the reference genome.
+        It's a dict of lists, where the key is the chromosome: e.g. "chr1"
+        The value is a list of CpG sites: e.g. [0, 35, 190, 212, 1055, ...]
+
+        We store this as a dict because it's easier to portably serialize to disk as JSON.
         """
 
         if self.verbose:
@@ -170,13 +186,108 @@ class GenomeMethylationEmbedding:
             json.dump(self.cpg_sites_dict, f)
 
     def load_windowed_cpg_site_cache(self):
-        pass
+        """Load a cache of winowed CpG sites."""
+
+        if os.path.exists(self.windowed_cpg_sites_cache) and os.path.exists(
+            self.windowed_cpg_sites_reverse_cache
+        ):
+            if self.verbose:
+                print(
+                    f"\tLoading windowed CpG sites from caches:\n\t\t{self.windowed_cpg_sites_cache}\n\t\t{self.windowed_cpg_sites_reverse_cache}"
+                )
+
+            with gzip.open(self.windowed_cpg_sites_cache, "rt") as f:
+                self.windowed_cpg_sites_dict = json.load(f)
+            with gzip.open(self.windowed_cpg_sites_reverse_cache, "rt") as f:
+                # This wild object_hook is to convert the keys back to integers, since JSON only supports strings as keys
+                self.windowed_cpg_sites_dict_reverse = json.load(
+                    f,
+                    object_hook=lambda d: {
+                        int(k) if k.isdigit() else k: v for k, v in d.items()
+                    },
+                )
+        else:
+            raise FileNotFoundError("\tNo cache of windowed CpG sites found.")
 
     def generate_windowed_cpg_sites(self):
-        pass
+        """Generate a dict of CpG sites for each chromosome in the reference genome.
+
+        This is a dict of lists, where but each list contains a tuple of CpG ranges witin a window
+        The key is the chromosome: e.g. "chr1"
+        The value is a list of CpG sites: e.g. [(0, 35), (190, 212), (1055, ...)]
+
+        We store this as a dict because it's easier to portably serialize to disk as JSON.
+
+        NOTE: The window size is tricky -- it's set usually to the read size, but reads can be larger than the window size,
+        since they can map with deletions, etc. So we need to be careful here."""
+
+        # Let's generate ranges (windows) of all CpGs within READ_SIZE of each other
+        # This is to subsequently query our .bam/.sam files for reads containing CpGs
+        # TODO: Shrink read size a little to account for trimming?
+        assert (
+            10 < self.window_size < 500
+        ), "Read size is atypical, please double check (only validated for ~150 bp.)"
+
+        if self.verbose:
+            print(
+                f"\n\tGenerating windowed CpG sites dict (window size = {self.window_size} bp.)\n"
+            )
+
+        # Loop over all chromosomes
+        for chrom, cpg_sites in tqdm(
+            self.cpg_sites_dict.items(), disable=not self.verbose
+        ):
+            self.windowed_cpg_sites_dict[chrom] = []
+            self.windowed_cpg_sites_dict_reverse[chrom] = {}
+            window_start = None
+            window_end = None
+
+            # Loop over all CpG sites
+            cpg_sites_len = len(cpg_sites)
+            temp_per_window_cpg_sites = []
+            for i in range(cpg_sites_len):
+                temp_per_window_cpg_sites.append(cpg_sites[i])
+
+                if window_start is None:
+                    window_start = cpg_sites[i]
+
+                # If we're at the end of the chromosome or the next CpG site is too far away
+                if (
+                    i + 1 == cpg_sites_len
+                    or (cpg_sites[i + 1] - cpg_sites[i]) > self.window_size
+                ):
+                    # We have a complete window
+                    window_end = cpg_sites[i]
+                    self.windowed_cpg_sites_dict[chrom].append(
+                        (window_start, window_end)
+                    )
+                    self.windowed_cpg_sites_dict_reverse[chrom][
+                        window_start
+                    ] = temp_per_window_cpg_sites
+                    temp_per_window_cpg_sites = []
+                    window_start = None
+                    window_end = None
 
     def save_windowed_cpg_site_cache(self):
-        pass
+        """Save a cache of windowed CpG sites."""
+
+        # Save these to .json caches
+        if self.verbose:
+            print(
+                f"\tSaving windowed CpG sites to caches:\n\t\t{self.windowed_cpg_sites_cache}\n\t\t{self.windowed_cpg_sites_reverse_cache}"
+            )
+
+        with gzip.open(
+            self.windowed_cpg_sites_cache, "wt", compresslevel=3, encoding="utf-8"
+        ) as f:
+            json.dump(self.windowed_cpg_sites_dict, f)
+        with gzip.open(
+            self.windowed_cpg_sites_reverse_cache,
+            "wt",
+            compresslevel=3,
+            encoding="utf-8",
+        ) as f:
+            json.dump(self.windowed_cpg_sites_dict_reverse, f)
 
     def add_methylation_embedding(self, methylation_embedding):
         self.methylation_embedding = methylation_embedding
