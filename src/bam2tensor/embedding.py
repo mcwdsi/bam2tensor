@@ -289,29 +289,39 @@ class GenomeMethylationEmbedding:
         ) as f:
             json.dump(self.windowed_cpg_sites_dict_reverse, f)
 
-    def add_methylation_embedding(self, methylation_embedding):
-        self.methylation_embedding = methylation_embedding
+    def get_genomic_position(self, embedding: int) -> tuple[str, int]:
+        """Given an embedding position, return the chromosome and position.
 
-    def get_methylation_embedding(self):
-        return self.methylation_embedding
+        Parameters
+        ----------
+        embedding_pos : int
+            The embedding position.
 
-    def get_genome_name(self):
-        return self.genome_name
+        Returns
+        -------
+        tuple:
+            The chromosome and position, e.g. ("chr1", 12345)
+        """
+        assert embedding >= 0 and embedding < self.total_cpg_sites
 
-    def get_methylation_embedding_size(self):
-        return len(self.methylation_embedding)
+        # Find the index of the first element in cpgs_per_chr_cumsum that is greater than or equal to the embedding position
+        chr_index = np.searchsorted(
+            self.cpgs_per_chr_cumsum, embedding + 1, side="left"
+        )
 
-    def get_methylation_embedding_vector(self, position):
-        return self.methylation_embedding[position]
-
-    def get_methylation_embedding_vector_size(self, position):
-        return len(self.methylation_embedding[position])
-
-    def get_methylation_embedding_vector_at_position(self, position):
-        return self.methylation_embedding[position]
-
-    def get_methylation_embedding_vector_at_position_size(self, position):
-        return len(self.methylation_embedding[position])
+        # Now we know the chromosome, but we need to find the position within the chromosome
+        # If this is the first chromosome, the position is just the embedding position
+        if chr_index == 0:
+            return (
+                self.expected_chromosomes[chr_index],
+                self.cpg_sites_dict[self.expected_chromosomes[chr_index]][embedding],
+            )
+        # Otherwise, subtract the length of the previous chromosomes from the embedding position
+        embedding -= self.cpgs_per_chr_cumsum[chr_index - 1]  # type: ignore
+        return (
+            self.expected_chromosomes[chr_index],
+            self.cpg_sites_dict[self.expected_chromosomes[chr_index]][embedding],
+        )
 
     def test_stub(self):
         """
