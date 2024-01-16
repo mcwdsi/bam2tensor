@@ -5,17 +5,12 @@ import sys
 import time
 
 # Third party modules
-import numpy as np
 import scipy.sparse
 
 from bam2tensor.embedding import GenomeMethylationEmbedding
 
 from bam2tensor.functions import (
-    get_cpg_sites_from_fasta,
-    get_windowed_cpg_sites,
     extract_methylation_data_from_bam,
-    embedding_to_genomic_position,
-    genomic_position_to_embedding,
     CHROMOSOMES,
 )
 
@@ -112,117 +107,23 @@ def main(
                 os.path.dirname(os.path.abspath(output_file)), os.W_OK
             ), f"Output file path is not writable: {output_file}"
 
-    # Create a new GenomeMethylationEmbedding object
+    # Create (or load) a GenomeMethylationEmbedding object
     genome_methylation_embedding = GenomeMethylationEmbedding(
         genome_name="hg38",
-        fasta_source=reference_fasta,
         expected_chromosomes=CHROMOSOMES,
+        fasta_source=reference_fasta,
     )
+
+    genome_methylation_embedding.load_cpg_sites()
+
+    assert genome_methylation_embedding.embedding_loaded
+
     print(genome_methylation_embedding)
-    return
-
-    # We need to obtain all cpg sites in the reference genome
-    # NOTE: This can take a while (~10 minutes for GRCh38 if not cached)
-    cpg_sites_dict = get_cpg_sites_from_fasta(
-        reference_fasta=reference_fasta, verbose=verbose, skip_cache=skip_cache
-    )
-
-    # How many CpG sites are there?
-    total_cpg_sites = sum([len(v) for v in cpg_sites_dict.values()])
-    if verbose:
-        print(f"Total CpG sites: {total_cpg_sites:,}")
-
-    assert total_cpg_sites > 28_000_000  # Validity check for hg38
-
-    # Create a dictionary of chromosome -> CpG site -> index (embedding) for efficient lookup
-    chr_to_cpg_to_embedding_dict = {
-        ch: {cpg: idx for idx, cpg in enumerate(cpg_sites_dict[ch])}
-        for ch in CHROMOSOMES
-    }
-
-    # Count the number of CpGs per chromosome
-    cpgs_per_chr: dict[str, int] = {k: len(v) for k, v in cpg_sites_dict.items()}
-
-    # Add up the number of CpGs per chromosome, e.g. chr1, then chr1+chr2, then chr1+chr2+chr3, etc
-    cpgs_per_chr_cumsum: np.ndarray = np.cumsum([cpgs_per_chr[k] for k in CHROMOSOMES])
-
-    # TODO: Move these into to a formal test framework
-    # TODO: Simplify the input framework (likely object orient the window / cpg dict?)
-    # FYI embedding_to_genomic_position is unused currently :P
-    ### Tests
-    assert cpgs_per_chr_cumsum[-1] == total_cpg_sites
-    assert embedding_to_genomic_position(
-        total_cpg_sites, cpg_sites_dict, cpgs_per_chr_cumsum, 0
-    ) == ("chr1", cpg_sites_dict["chr1"][0])
-    assert embedding_to_genomic_position(
-        total_cpg_sites, cpg_sites_dict, cpgs_per_chr_cumsum, 1
-    ) == ("chr1", cpg_sites_dict["chr1"][1])
-    # Edges
-    assert embedding_to_genomic_position(
-        total_cpg_sites, cpg_sites_dict, cpgs_per_chr_cumsum, cpgs_per_chr_cumsum[0]
-    ) == ("chr2", cpg_sites_dict["chr2"][0])
-    assert embedding_to_genomic_position(
-        total_cpg_sites,
-        cpg_sites_dict,
-        cpgs_per_chr_cumsum,
-        cpgs_per_chr_cumsum[-1] - 1,
-    ) == ("chrY", cpg_sites_dict["chrY"][-1])
-
-    ### Tests
-    assert (
-        genomic_position_to_embedding(
-            chr_to_cpg_to_embedding_dict,
-            cpgs_per_chr_cumsum,
-            "chr1",
-            cpg_sites_dict["chr1"][0],
-        )
-        == 0
-    )
-    assert (
-        genomic_position_to_embedding(
-            chr_to_cpg_to_embedding_dict,
-            cpgs_per_chr_cumsum,
-            "chr1",
-            cpg_sites_dict["chr1"][1],
-        )
-        == 1
-    )
-    # Edges
-    assert (
-        genomic_position_to_embedding(
-            chr_to_cpg_to_embedding_dict,
-            cpgs_per_chr_cumsum,
-            "chr2",
-            cpg_sites_dict["chr2"][0],
-        )
-        == cpgs_per_chr_cumsum[0]
-    )
-    assert (
-        genomic_position_to_embedding(
-            chr_to_cpg_to_embedding_dict,
-            cpgs_per_chr_cumsum,
-            "chrY",
-            cpg_sites_dict["chrY"][-1],
-        )
-        == cpgs_per_chr_cumsum[-1] - 1
-    )
-    ########
-
-    # Get our windowed_cpg_sites, hopefully cached!
-    if verbose:
-        print("\nLoading (or generating) windowed CpG sites for reference genome.")
-
-    windowed_cpg_sites_dict, windowed_cpg_sites_dict_reverse = get_windowed_cpg_sites(
-        reference_fasta=reference_fasta,
-        cpg_sites_dict=cpg_sites_dict,
-        window_size=window_size,
-        verbose=verbose,
-        skip_cache=skip_cache,
-    )
 
     if verbose:
         print(f"\nTime elapsed: {time.time() - time_start:.2f} seconds")
 
+    return
     #################################################
     # Operate over the input BAM files
     #################################################
