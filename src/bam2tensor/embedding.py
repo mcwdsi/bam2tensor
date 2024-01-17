@@ -46,6 +46,7 @@ class GenomeMethylationEmbedding:
         self.expected_chromosomes = expected_chromosomes
         self.verbose = verbose
         self.window_size = 150
+        self.total_cpg_sites = 0
 
         # Store the CpG sites in a dict per chromosome
         self.cpg_sites_dict: dict[str, list[int]] = {}
@@ -74,9 +75,10 @@ class GenomeMethylationEmbedding:
             try:
                 self.load_cpg_site_cache()
             except FileNotFoundError as e:
-                if verbose:
+                if self.verbose:
                     print("Could not load methylation embedding from cache: " + str(e))
 
+        # If we don't have a cached methylation embedding, parse the fasta file
         if len(self.cpg_sites_dict) == 0:
             self.parse_fasta_for_cpg_sites()
 
@@ -84,11 +86,11 @@ class GenomeMethylationEmbedding:
             self.save_cpg_site_cache()
 
         # How many CpG sites are there?
-        total_cpg_sites = sum([len(v) for v in self.cpg_sites_dict.values()])
-        if verbose:
-            print(f"Total CpG sites: {total_cpg_sites:,}")
+        self.total_cpg_sites = sum([len(v) for v in self.cpg_sites_dict.values()])
+        if self.verbose:
+            print(f"Total CpG sites: {self.total_cpg_sites:,}")
 
-        assert total_cpg_sites > 28_000_000  # Validity check for hg38
+        assert self.total_cpg_sites > 28_000_000  # Validity check for hg38
 
         # TODO: Shove these and expected_chromosomes into an object that we can save and cache
         # Create a dictionary of chromosome -> CpG site -> index (embedding) for efficient lookup
@@ -106,6 +108,27 @@ class GenomeMethylationEmbedding:
         self.cpgs_per_chr_cumsum: np.ndarray = np.cumsum(
             [self.cpgs_per_chr[k] for k in self.expected_chromosomes]
         )
+
+        ###########
+        # Now generate windowed CpG sites for efficient querying of .bam files
+
+        # Try to load cached window data if available
+        if not skip_cache:
+            try:
+                self.load_windowed_cpg_site_cache()
+            except FileNotFoundError as e:
+                if self.verbose:
+                    print("Could not load windowed embedding from cache: " + str(e))
+
+        # If we don't have a cached methylation embedding, parse the fasta file
+        if len(self.windowed_cpg_sites_dict) == 0:
+            self.generate_windowed_cpg_sites()
+
+        if not skip_cache:
+            self.save_windowed_cpg_site_cache()
+
+        if verbose:
+            print(f"Loaded methylation embedding for: {self.genome_name}")
 
     def load_cpg_site_cache(self):
         """Load a cache of CpG sites from a previously parsed fasta."""
@@ -173,6 +196,9 @@ class GenomeMethylationEmbedding:
 
             self.cpg_sites_dict[seqrecord.id] = cpg_indices
 
+        if self.verbose:
+            print(f"\tFound {len(self.cpg_sites_dict)} chromosomes in reference fasta.")
+
     def save_cpg_site_cache(self):
         """Save a cache of CpG sites from a previously parsed fasta."""
 
@@ -192,9 +218,9 @@ class GenomeMethylationEmbedding:
             self.windowed_cpg_sites_reverse_cache
         ):
             if self.verbose:
-                print(
-                    f"\tLoading windowed CpG sites from caches:\n\t\t{self.windowed_cpg_sites_cache}\n\t\t{self.windowed_cpg_sites_reverse_cache}"
-                )
+                print("\tLoading windowed CpG sites from caches:")
+                print(f"\t\t{self.windowed_cpg_sites_cache}")
+                print(f"\t\t{self.windowed_cpg_sites_reverse_cache}")
 
             with gzip.open(self.windowed_cpg_sites_cache, "rt") as f:
                 self.windowed_cpg_sites_dict = json.load(f)
@@ -268,14 +294,19 @@ class GenomeMethylationEmbedding:
                     window_start = None
                     window_end = None
 
+        if self.verbose:
+            print(
+                f"Loaded {len(self.windowed_cpg_sites_dict)} chromosomes from window cache."
+            )
+
     def save_windowed_cpg_site_cache(self):
         """Save a cache of windowed CpG sites."""
 
         # Save these to .json caches
         if self.verbose:
-            print(
-                f"\tSaving windowed CpG sites to caches:\n\t\t{self.windowed_cpg_sites_cache}\n\t\t{self.windowed_cpg_sites_reverse_cache}"
-            )
+            print("\tSaving windowed CpG sites to caches:")
+            print(f"\t\t{self.windowed_cpg_sites_cache}")
+            print(f"\t\t{self.windowed_cpg_sites_reverse_cache}")
 
         with gzip.open(
             self.windowed_cpg_sites_cache, "wt", compresslevel=3, encoding="utf-8"
