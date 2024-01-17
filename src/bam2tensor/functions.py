@@ -49,15 +49,21 @@ def extract_methylation_data_from_bam(
     """
     Extract methylation data from a .bam file.
 
-    Args:
+    Args
+    -------
         input_bam: Path to the input .bam file.
         quality_limit: Minimum mapping quality to include.
         genome_methylation_embedding: A GenomeMethylationEmbedding object.
         verbose: Print verbose output.
         debug: Print debug output.
 
-    Returns:
+    Returns
+    -------
         A scipy.sparse.coo_matrix of the methylation data.
+
+    Raises
+    -------
+        FileNotFoundError: If the input .bam file is not found.
     """
     try:
         input_bam_object = pysam.AlignmentFile(  # type: ignore

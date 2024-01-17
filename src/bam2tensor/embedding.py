@@ -31,7 +31,7 @@ class GenomeMethylationEmbedding:
     ):
         """Initialize the methylation embedding.
 
-        Parameters
+        Args
         ----------
         genome_name : str
             The name of the genome.
@@ -44,11 +44,11 @@ class GenomeMethylationEmbedding:
         verbose : bool, optional
             Verbose output.
 
-        Returns:
+        Returns
         --------
         None
 
-        Raises:
+        Raises
         -------
         ValueError
             If the expected chromosomes are empty.
@@ -148,7 +148,7 @@ class GenomeMethylationEmbedding:
     def load_cpg_site_cache(self):
         """Load a cache of CpG sites from a previously parsed fasta.
 
-        Raises:
+        Raises
         -------
         FileNotFoundError
             If the cached CpG site file cannot be found.
@@ -182,7 +182,7 @@ class GenomeMethylationEmbedding:
 
         We store this as a dict because it's easier to portably serialize to disk as JSON.
 
-        Raises:
+        Raises
         -------
         FileNotFoundError
             If the fasta file cannot be found.
@@ -356,7 +356,7 @@ class GenomeMethylationEmbedding:
     def embedding_to_genomic_position(self, embedding: int) -> tuple[str, int]:
         """Given an embedding position, return the chromosome and position.
 
-        Parameters
+        Args
         ----------
         embedding_pos : int
             The embedding position.
@@ -390,7 +390,7 @@ class GenomeMethylationEmbedding:
     def genomic_position_to_embedding(self, chrom: str, pos: int) -> int:
         """Given a genomic position, return the embedding position.
 
-        Parameters
+        Args
         ----------
         chrom : str
             The chromosome, e.g. "chr1"
