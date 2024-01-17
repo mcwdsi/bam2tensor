@@ -88,7 +88,7 @@ class GenomeMethylationEmbedding:
         # How many CpG sites are there?
         self.total_cpg_sites = sum([len(v) for v in self.cpg_sites_dict.values()])
         if self.verbose:
-            print(f"Total CpG sites: {self.total_cpg_sites:,}")
+            print(f"\t\tTotal CpG sites: {self.total_cpg_sites:,}")
 
         assert self.total_cpg_sites > 28_000_000  # Validity check for hg38
 
@@ -176,7 +176,8 @@ class GenomeMethylationEmbedding:
             disable=not self.verbose,
         ):
             if seqrecord.id not in self.expected_chromosomes:
-                tqdm.write(f"\tSkipping chromosome {seqrecord.id}")
+                if self.verbose:
+                    tqdm.write(f"\tSkipping chromosome {seqrecord.id}")
                 continue
             sequence = seqrecord.seq
 
@@ -320,7 +321,7 @@ class GenomeMethylationEmbedding:
         ) as f:
             json.dump(self.windowed_cpg_sites_dict_reverse, f)
 
-    def get_genomic_position(self, embedding: int) -> tuple[str, int]:
+    def embedding_to_genomic_position(self, embedding: int) -> tuple[str, int]:
         """Given an embedding position, return the chromosome and position.
 
         Parameters
@@ -353,6 +354,31 @@ class GenomeMethylationEmbedding:
             self.expected_chromosomes[chr_index],
             self.cpg_sites_dict[self.expected_chromosomes[chr_index]][embedding],
         )
+
+    def genomic_position_to_embedding(self, chrom: str, pos: int) -> int:
+        """Given a genomic position, return the embedding position.
+
+        Parameters
+        ----------
+        chrom : str
+            The chromosome, e.g. "chr1"
+        pos : int
+            The position, e.g. 12345
+
+        Returns
+        -------
+        embedding_pos : int
+            The numerical CpG embedding position, e.g. 3493
+        """
+        # Find the index of the chromosome
+        chr_index = self.expected_chromosomes[chrom]
+        # Find the index of the CpG site in the chromosome
+        cpg_index = self.chr_to_cpg_to_embedding_dict[chrom][pos]
+        # If this is the first chromosome, the embedding position is just the CpG index
+        if chr_index == 0:
+            return cpg_index
+        # Otherwise, add the length of the previous chromosomes to the CpG index
+        return cpg_index + self.cpgs_per_chr_cumsum[chr_index - 1]  # type: ignore
 
     def test_stub(self):
         """
