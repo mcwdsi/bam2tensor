@@ -160,19 +160,17 @@ class GenomeMethylationEmbedding:
         """
 
         if self.verbose:
-            print(f"\nLoading all CpG sites for: {self.genome_name}")
+            print(f"\n\tLoading all CpG sites for: {self.genome_name}")
 
         if os.path.exists(self.cached_cpg_sites_json):
             if self.verbose:
-                print(
-                    f"\tLoading all CpG sites from cache: {self.cached_cpg_sites_json}"
-                )
+                print(f"\t\tReading CpG sites from cache: {self.cached_cpg_sites_json}")
             # TODO: Add type hinting via TypedDicts?
             # e.g. https://stackoverflow.com/questions/51291722/define-a-jsonable-type-using-mypy-pep-526
             with gzip.open(self.cached_cpg_sites_json, "rt") as f:
                 self.cpg_sites_dict = json.load(f)
         else:
-            raise FileNotFoundError("\tNo cache of all CpG sites found.")
+            raise FileNotFoundError("\tNo cache of CpG sites found.")
 
     def parse_fasta_for_cpg_sites(self):
         """Generate a dict of *all* CpG sites across each chromosome in the reference genome.

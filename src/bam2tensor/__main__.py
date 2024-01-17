@@ -90,7 +90,7 @@ def main(
             if overwrite:
                 if verbose:
                     print(
-                        f"\tOutput file exists and --overwrite specified. Will overwrite: {output_file}"
+                        "\t\tOutput file exists and --overwrite specified. Will overwrite existing .methylation.npz file."
                     )
                 assert os.access(
                     output_file, os.W_OK
