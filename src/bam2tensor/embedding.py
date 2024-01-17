@@ -61,6 +61,11 @@ class GenomeMethylationEmbedding:
         self.verbose = verbose
         self.window_size = window_size
 
+        # A dict of chromosomes -> index for quick lookups (e.g. "chr1" -> 0)
+        self.chromosomes_dict: dict[str, int] = {
+            ch: idx for idx, ch in enumerate(self.expected_chromosomes)
+        }
+
         self.total_cpg_sites = 0
 
         # Store the CpG sites in a dict per chromosome
@@ -97,8 +102,8 @@ class GenomeMethylationEmbedding:
         if len(self.cpg_sites_dict) == 0:
             self.parse_fasta_for_cpg_sites()
 
-        if not skip_cache:
-            self.save_cpg_site_cache()
+            if not skip_cache:
+                self.save_cpg_site_cache()
 
         # How many CpG sites are there?
         self.total_cpg_sites = sum([len(v) for v in self.cpg_sites_dict.values()])
@@ -139,8 +144,8 @@ class GenomeMethylationEmbedding:
         if len(self.windowed_cpg_sites_dict) == 0:
             self.generate_windowed_cpg_sites()
 
-        if not skip_cache:
-            self.save_windowed_cpg_site_cache()
+            if not skip_cache:
+                self.save_windowed_cpg_site_cache()
 
         if verbose:
             print(f"Loaded methylation embedding for: {self.genome_name}")
@@ -165,9 +170,7 @@ class GenomeMethylationEmbedding:
             # TODO: Add type hinting via TypedDicts?
             # e.g. https://stackoverflow.com/questions/51291722/define-a-jsonable-type-using-mypy-pep-526
             with gzip.open(self.cached_cpg_sites_json, "rt") as f:
-                cpg_sites_dict = json.load(f)
-
-            return cpg_sites_dict  # type: ignore
+                self.cpg_sites_dict = json.load(f)
         else:
             raise FileNotFoundError("\tNo cache of all CpG sites found.")
 
@@ -237,6 +240,8 @@ class GenomeMethylationEmbedding:
             self.cached_cpg_sites_json, "wt", compresslevel=3, encoding="utf-8"
         ) as f:
             json.dump(self.cpg_sites_dict, f)
+        if self.verbose:
+            print("\tSaved CpG cache.")
 
     def load_windowed_cpg_site_cache(self):
         """Load a cache of windowed CpG sites.
@@ -353,6 +358,9 @@ class GenomeMethylationEmbedding:
         ) as f:
             json.dump(self.windowed_cpg_sites_dict_reverse, f)
 
+        if self.verbose:
+            print("\tSaved windowed Cpg cache.")
+
     def embedding_to_genomic_position(self, embedding: int) -> tuple[str, int]:
         """Given an embedding position, return the chromosome and position.
 
@@ -403,7 +411,7 @@ class GenomeMethylationEmbedding:
             The numerical CpG embedding position, e.g. 3493
         """
         # Find the index of the chromosome
-        chr_index = self.expected_chromosomes[chrom]
+        chr_index = self.chromosomes_dict[chrom]
         # Find the index of the CpG site in the chromosome
         cpg_index = self.chr_to_cpg_to_embedding_dict[chrom][pos]
         # If this is the first chromosome, the embedding position is just the CpG index
