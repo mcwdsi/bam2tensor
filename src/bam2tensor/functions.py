@@ -41,8 +41,8 @@ def example_function(number1: int, number2: int) -> str:
 
 def extract_methylation_data_from_bam(
     input_bam: str,
-    quality_limit: int = 0,
-    genome_methylation_embedding: GenomeMethylationEmbedding = None,
+    genome_methylation_embedding: GenomeMethylationEmbedding,
+    quality_limit: int = 20,
     verbose: bool = False,
     debug: bool = False,
 ) -> scipy.sparse.coo_matrix:
@@ -236,13 +236,17 @@ def extract_methylation_data_from_bam(
         print(f"\tlen(read_name_to_row_number): {len(debug_read_name_to_row_number):,}")
         print(f"\ttotal_cpg_sites: {genome_methylation_embedding.total_cpg_sites:,}")
 
-    # The size of the coo_matrix is:
-    #   Number of rows = number of reads that pass our filters
-    #   Number of columns = number of CpG sites
-
-    return scipy.sparse.coo_matrix(
+    # Generate the sparse matrix
+    sparse_matrix = scipy.sparse.coo_matrix(
         (coo_data, (coo_row, coo_col)),
         shape=(read_number, genome_methylation_embedding.total_cpg_sites),
     )
+
+    # Validate a dimension of the coo_matrix, which should be:
+    #   Number of rows = number of reads that pass our filters
+    #   Number of columns = number of CpG sites
+    assert sparse_matrix.shape[1] == genome_methylation_embedding.total_cpg_sites
+
+    return sparse_matrix
 
     # return scipy.sparse.coo_matrix((coo_data, (coo_row, coo_col)), shape=(len(read_name_to_row_number) + 1, total_cpg_sites))

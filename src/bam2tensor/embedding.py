@@ -24,7 +24,7 @@ class GenomeMethylationEmbedding:
         self,
         genome_name,
         expected_chromosomes,
-        fasta_source: str = None,
+        fasta_source: str,
         window_size: int = 150,
         skip_cache: bool = False,
         verbose: bool = False,
@@ -43,6 +43,17 @@ class GenomeMethylationEmbedding:
             Skip loading from cache.
         verbose : bool, optional
             Verbose output.
+
+        Returns:
+        --------
+        None
+
+        Raises:
+        -------
+        ValueError
+            If the expected chromosomes are empty.
+        FileNotFoundError
+            If the fasta file cannot be found.
         """
         self.genome_name = genome_name
         self.fasta_source = fasta_source
@@ -61,13 +72,13 @@ class GenomeMethylationEmbedding:
         # This is a dict of lists, where but each list contains a tuple of CpG ranges witin a window
         # Key: chromosome, e.g. "chr1"
         # Value: a list of tuples, e.g. [(0,35), (190,212), (1055,)]
-        self.windowed_cpg_sites_dict = {}
+        self.windowed_cpg_sites_dict: dict[str, list[tuple]] = {}
 
         self.windowed_cpg_sites_reverse_cache = (
             self.genome_name + ".cpg_windowed_sites_reverse.json.gz"
         )
         # And a reverse dict of dicts where chrom->window_start->[cpgs]
-        self.windowed_cpg_sites_dict_reverse = {}
+        self.windowed_cpg_sites_dict_reverse: dict[str, dict[int, list]] = {}
 
         # TODO: Store the expected chromosomes in some cached object.
         # Check that the expected chromosomes are not empty
@@ -135,7 +146,13 @@ class GenomeMethylationEmbedding:
             print(f"Loaded methylation embedding for: {self.genome_name}")
 
     def load_cpg_site_cache(self):
-        """Load a cache of CpG sites from a previously parsed fasta."""
+        """Load a cache of CpG sites from a previously parsed fasta.
+
+        Raises:
+        -------
+        FileNotFoundError
+            If the cached CpG site file cannot be found.
+        """
 
         if self.verbose:
             print(f"\nLoading all CpG sites for: {self.genome_name}")
@@ -164,6 +181,11 @@ class GenomeMethylationEmbedding:
         The value is a list of CpG sites: e.g. [0, 35, 190, 212, 1055, ...]
 
         We store this as a dict because it's easier to portably serialize to disk as JSON.
+
+        Raises:
+        -------
+        FileNotFoundError
+            If the fasta file cannot be found.
         """
 
         if self.verbose:
@@ -217,7 +239,13 @@ class GenomeMethylationEmbedding:
             json.dump(self.cpg_sites_dict, f)
 
     def load_windowed_cpg_site_cache(self):
-        """Load a cache of winowed CpG sites."""
+        """Load a cache of windowed CpG sites.
+
+        Raises:
+        -------
+        FileNotFoundError
+            If the cached windowed CpG site file cannot be found.
+        """
 
         if os.path.exists(self.windowed_cpg_sites_cache) and os.path.exists(
             self.windowed_cpg_sites_reverse_cache

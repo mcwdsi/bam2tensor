@@ -147,16 +147,10 @@ def main(
 
         methylation_data_coo = extract_methylation_data_from_bam(
             input_bam=input_bam,
-            quality_limit=quality_limit,
             genome_methylation_embedding=genome_methylation_embedding,
+            quality_limit=quality_limit,
             verbose=verbose,
             debug=debug,
-        )  # TODO: simplify these inputs!
-
-        # Return validity test (TODO: move to the function itself?)
-        assert (
-            methylation_data_coo.shape[1]
-            == genome_methylation_embedding.total_cpg_sites
         )
 
         if verbose:
