@@ -120,13 +120,13 @@ class GenomeMethylationEmbedding:
         }
 
         # Count the number of CpGs per chromosome
-        self.cpgs_per_chr: dict[str, int] = {
+        cpgs_per_chr: dict[str, int] = {
             k: len(v) for k, v in self.cpg_sites_dict.items()
         }
 
         # Add up the number of CpGs per chromosome, e.g. chr1, then chr1+chr2, then chr1+chr2+chr3, etc
         self.cpgs_per_chr_cumsum: np.ndarray = np.cumsum(
-            [self.cpgs_per_chr[k] for k in self.expected_chromosomes]
+            [cpgs_per_chr[k] for k in self.expected_chromosomes]
         )
 
         ###########
