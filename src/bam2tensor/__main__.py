@@ -11,7 +11,6 @@ from bam2tensor.embedding import GenomeMethylationEmbedding
 
 from bam2tensor.functions import (
     extract_methylation_data_from_bam,
-    CHROMOSOMES,
 )
 
 
@@ -107,23 +106,32 @@ def main(
                 os.path.dirname(os.path.abspath(output_file)), os.W_OK
             ), f"Output file path is not writable: {output_file}"
 
+    if verbose:
+        print(
+            f"\nLoading (or generating) methylation embedding named: {reference_fasta}"
+        )
+
+    ## Globals
+    HG38_CHROMOSOMES = ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
+    # MM39_CHROMOSOMES = ["chr" + str(i) for i in range(1, 20)] + ["chrX", "chrY"]
+    # TEST_CHROMOSOMES = ["chr1"]
+
+    # dict: {chromosome: index}, e.g. {"chr1": 0, "chr2": 1, ...}
+    # CHROMOSOMES_DICT = {ch: idx for idx, ch in enumerate(CHROMOSOMES)}
+
     # Create (or load) a GenomeMethylationEmbedding object
     genome_methylation_embedding = GenomeMethylationEmbedding(
         genome_name="hg38",
-        expected_chromosomes=CHROMOSOMES,
+        expected_chromosomes=HG38_CHROMOSOMES,
         fasta_source=reference_fasta,
+        window_size=window_size,
+        skip_cache=skip_cache,
+        verbose=verbose,
     )
-
-    genome_methylation_embedding.load_cpg_sites()
-
-    assert genome_methylation_embedding.embedding_loaded
-
-    print(genome_methylation_embedding)
 
     if verbose:
         print(f"\nTime elapsed: {time.time() - time_start:.2f} seconds")
 
-    return
     #################################################
     # Operate over the input BAM files
     #################################################
@@ -139,18 +147,17 @@ def main(
 
         methylation_data_coo = extract_methylation_data_from_bam(
             input_bam=input_bam,
-            total_cpg_sites=total_cpg_sites,
-            chr_to_cpg_to_embedding_dict=chr_to_cpg_to_embedding_dict,
-            cpgs_per_chr_cumsum=cpgs_per_chr_cumsum,
-            windowed_cpg_sites_dict=windowed_cpg_sites_dict,
-            windowed_cpg_sites_dict_reverse=windowed_cpg_sites_dict_reverse,
             quality_limit=quality_limit,
+            genome_methylation_embedding=genome_methylation_embedding,
             verbose=verbose,
             debug=debug,
         )  # TODO: simplify these inputs!
 
         # Return validity test (TODO: move to the function itself?)
-        assert methylation_data_coo.shape[1] == total_cpg_sites
+        assert (
+            methylation_data_coo.shape[1]
+            == genome_methylation_embedding.total_cpg_sites
+        )
 
         if verbose:
             print(f"\nWriting methylation data to: {output_file}")

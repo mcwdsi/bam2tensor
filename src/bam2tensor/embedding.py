@@ -18,34 +18,38 @@ class GenomeMethylationEmbedding:
     methylation embedding information for each CpG site for analyzing .bam files.
 
     Stored embedding information cached and stored in gzipped json files.
-
-    Attributes:
-        genome_name: The name of the genome.
-        fasta_source: The source of the fasta file.
-        expected_chromosomes: The expected chromosomes in the genome.
-        methylation_embedding: The methylation embedding for the genome.
-
     """
-
-    genome_name = None
-    fasta_source = None
-    expected_chromosomes = None
-    embedding_loaded = False
-    cpg_sites_dict = None
 
     def __init__(
         self,
         genome_name,
         expected_chromosomes,
         fasta_source: str = None,
+        window_size: int = 150,
         skip_cache: bool = False,
         verbose: bool = False,
     ):
+        """Initialize the methylation embedding.
+
+        Parameters
+        ----------
+        genome_name : str
+            The name of the genome.
+        expected_chromosomes : list[str]
+            The expected chromosomes in the genome.
+        fasta_source : str, optional
+            The source of the fasta file.
+        skip_cache : bool, optional
+            Skip loading from cache.
+        verbose : bool, optional
+            Verbose output.
+        """
         self.genome_name = genome_name
         self.fasta_source = fasta_source
         self.expected_chromosomes = expected_chromosomes
         self.verbose = verbose
-        self.window_size = 150
+        self.window_size = window_size
+
         self.total_cpg_sites = 0
 
         # Store the CpG sites in a dict per chromosome
