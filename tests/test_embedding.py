@@ -5,8 +5,8 @@ test_embedding = embedding.GenomeMethylationEmbedding(
     expected_chromosomes=["chr1", "chr2", "chr3"],
     fasta_source="tests/test_fasta.fa",
     window_size=150,
-    skip_cache=False,
-    verbose=False,
+    skip_cache=True,
+    verbose=True,
 )
 
 
