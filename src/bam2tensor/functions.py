@@ -88,7 +88,7 @@ def extract_methylation_data_from_bam(
                     continue
 
                 if debug:
-                    print(aligned_segment.query_name)
+                    print(f"Query: {aligned_segment.query_name}")
                     # Validity tests
                     assert not aligned_segment.is_unmapped
                     assert aligned_segment.is_supplementary is False
@@ -106,7 +106,7 @@ def extract_methylation_data_from_bam(
                     # Ensure each read is only seen once
                     assert (
                         aligned_segment.query_name not in debug_read_name_to_row_number
-                    )
+                    ), "Read seen twice!"
                     debug_read_name_to_row_number[
                         aligned_segment.query_name  # type: ignore
                         + ("_1" if aligned_segment.is_read1 else "_2")

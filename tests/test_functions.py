@@ -8,7 +8,7 @@ TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
     fasta_source="tests/test_fasta.fa",
     window_size=150,
     skip_cache=False,
-    verbose=False,
+    verbose=True,
 )
 
 
@@ -20,8 +20,8 @@ def test_extract_methylation_data_from_bam() -> None:
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
         verbose=True,
-        debug=True,
+        debug=False,
     )
 
     # Need to make a better test bam & fa pair...
-    assert test_coo_matrix.shape == (0, 37489)
+    assert test_coo_matrix.shape == (1, 37489)
