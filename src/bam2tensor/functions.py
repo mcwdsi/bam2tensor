@@ -35,7 +35,7 @@ def extract_methylation_data_from_bam(
         FileNotFoundError: If the input .bam file is not found.
     """
     try:
-        input_bam_object = pysam.AlignmentFile(  # type: ignore
+        input_bam_object = pysam.AlignmentFile(  # type: ignore # pylint: disable=no-member
             input_bam, "rb", require_index=True, threads=1
         )
     except FileNotFoundError as exc:

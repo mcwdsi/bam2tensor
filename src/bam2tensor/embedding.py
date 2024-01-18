@@ -194,7 +194,9 @@ class GenomeMethylationEmbedding:
 
         # Check that we can read the fasta file
         if not os.access(self.fasta_source, os.R_OK):
-            raise FileNotFoundError("Cannot read fasta file: " + self.fasta_source)
+            raise FileNotFoundError(
+                "Cannot read fasta file: " + os.path.abspath(self.fasta_source)
+            )
 
         # Iterate over sequences
         for seqrecord in tqdm(
@@ -417,72 +419,3 @@ class GenomeMethylationEmbedding:
             return cpg_index
         # Otherwise, add the length of the previous chromosomes to the CpG index
         return cpg_index + self.cpgs_per_chr_cumsum[chr_index - 1]  # type: ignore
-
-    def test_stub(self):
-        """
-        Holder stub for some test.
-
-        TODO: Move these into to a formal test framework
-
-        # TODO: Simplify the input framework (likely object orient the window / cpg dict?)
-        """
-        assert self.cpgs_per_chr_cumsum[-1] == self.total_cpg_sites
-        assert self.embedding_to_genomic_position(
-            self.total_cpg_sites, self.cpg_sites_dict, self.cpgs_per_chr_cumsum, 0
-        ) == ("chr1", self.cpg_sites_dict["chr1"][0])
-        assert self.embedding_to_genomic_position(
-            self.total_cpg_sites, self.cpg_sites_dict, self.cpgs_per_chr_cumsum, 1
-        ) == ("chr1", self.cpg_sites_dict["chr1"][1])
-        # Edges
-        assert self.embedding_to_genomic_position(
-            self.total_cpg_sites,
-            self.cpg_sites_dict,
-            self.cpgs_per_chr_cumsum,
-            self.cpgs_per_chr_cumsum[0],
-        ) == ("chr2", self.cpg_sites_dict["chr2"][0])
-        assert self.embedding_to_genomic_position(
-            self.total_cpg_sites,
-            self.cpg_sites_dict,
-            self.cpgs_per_chr_cumsum,
-            self.cpgs_per_chr_cumsum[-1] - 1,
-        ) == ("chrY", self.cpg_sites_dict["chrY"][-1])
-
-        ### Tests
-        assert (
-            self.genomic_position_to_embedding(
-                self.chr_to_cpg_to_embedding_dict,
-                self.cpgs_per_chr_cumsum,
-                "chr1",
-                self.cpg_sites_dict["chr1"][0],
-            )
-            == 0
-        )
-        assert (
-            self.genomic_position_to_embedding(
-                self.chr_to_cpg_to_embedding_dict,
-                self.cpgs_per_chr_cumsum,
-                "chr1",
-                self.cpg_sites_dict["chr1"][1],
-            )
-            == 1
-        )
-        # Edges
-        assert (
-            self.genomic_position_to_embedding(
-                self.chr_to_cpg_to_embedding_dict,
-                self.cpgs_per_chr_cumsum,
-                "chr2",
-                self.cpg_sites_dict["chr2"][0],
-            )
-            == self.cpgs_per_chr_cumsum[0]
-        )
-        assert (
-            self.genomic_position_to_embedding(
-                self.chr_to_cpg_to_embedding_dict,
-                self.cpgs_per_chr_cumsum,
-                "chrY",
-                self.cpg_sites_dict["chrY"][-1],
-            )
-            == self.cpgs_per_chr_cumsum[-1] - 1
-        )
-        ########

@@ -181,4 +181,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main(prog_name="bam2tensor")  # pragma: no cover
+    main(prog_name="bam2tensor")  # pylint: disable=no-value-for-parameter
