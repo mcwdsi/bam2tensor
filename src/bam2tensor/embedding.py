@@ -3,7 +3,7 @@
 import gzip
 import json
 import os
-from typing import Union
+from typing import Union  # Remove when dropping Python 3.9
 
 # Third party modules
 import numpy as np

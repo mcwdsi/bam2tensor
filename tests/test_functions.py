@@ -19,8 +19,8 @@ def test_extract_methylation_data_from_bam() -> None:
         input_bam="tests/test.bam",
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
-        verbose=False,
-        debug=False,
+        verbose=True,
+        debug=True,
     )
 
     # Need to make a better test bam & fa pair...
