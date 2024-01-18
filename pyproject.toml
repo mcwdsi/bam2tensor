@@ -8,7 +8,7 @@ readme = "README.md"
 homepage = "https://github.com/mcwdsi/bam2tensor"
 repository = "https://github.com/mcwdsi/bam2tensor"
 documentation = "https://mcwdsi.github.io/bam2tensor"
-classifiers = ["Development Status :: 2 - Pre-Alpha"]
+classifiers = ["Development Status :: 3 - Alpha"]
 
 [tool.poetry.urls]
 Changelog = "https://github.com/mcwdsi/bam2tensor/releases"
