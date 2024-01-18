@@ -69,8 +69,6 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
             if not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
                 raise ValueError(f"Output file path is not writable: {output_file}")
 
-    return True
-
 
 @click.command(
     help="Extract read-level methylation data from an aligned .bam file and export the data as a SciPy sparse matrix."
