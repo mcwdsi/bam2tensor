@@ -3,6 +3,7 @@
 import gzip
 import json
 import os
+from typing import Union
 
 # Third party modules
 import numpy as np
@@ -361,7 +362,7 @@ class GenomeMethylationEmbedding:
             print("\tSaved windowed Cpg cache.")
 
     def embedding_to_genomic_position(
-        self, embedding: int | np.int64
+        self, embedding: Union[int, np.int64]
     ) -> tuple[str, int]:
         """Given an embedding position, return the chromosome and position.
 
