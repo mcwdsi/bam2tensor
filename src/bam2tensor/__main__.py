@@ -74,6 +74,11 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
     required=True,
 )
 @click.option(
+    "--genome-name",
+    help="Genome name (e.g. hg38, mm39, etc.)",
+    required=True,
+)
+@click.option(
     "--reference-fasta",
     help="Reference genome fasta file (critical to determine CpG sites).",
     required=True,
@@ -97,6 +102,7 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
 @click.option("--overwrite", help="Overwrite output file if it exists.", is_flag=True)
 def main(
     input_path: str,
+    genome_name: str,
     reference_fasta: str,
     quality_limit: int,
     window_size: int,
@@ -123,7 +129,7 @@ def main(
 
     # Create (or load) a GenomeMethylationEmbedding object
     genome_methylation_embedding = GenomeMethylationEmbedding(
-        genome_name="hg38",
+        genome_name=genome_name,
         expected_chromosomes=HG38_CHROMOSOMES,
         fasta_source=reference_fasta,
         window_size=window_size,
