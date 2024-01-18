@@ -99,7 +99,7 @@ jobs:
         if: always() && matrix.session == 'tests'
         uses: "actions/upload-artifact@v3"
         with:
-          name: coverage-data-${{ matrix.os }}-${{ matrix.python }}
+          name: coverage-data
           path: ".coverage.*"
 
       - name: Upload documentation
@@ -142,8 +142,7 @@ jobs:
       - name: Download coverage data
         uses: actions/download-artifact@v3
         with:
-          pattern: coverage-data-*
-          merge-multiple: true
+          pattern: coverage-data
 
       - name: Combine coverage data and display human readable report
         run: |
