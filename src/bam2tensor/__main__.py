@@ -16,11 +16,17 @@ from bam2tensor.functions import (
 def get_input_bams(input_path: str) -> list:
     """Determine if the input is a path or file, and return a list of .bam files to process.
 
-    Args:
-        input_path (str): Input path or file.
+    Args
+    ----------
+    input_path (str): Input path or file.
 
-    Returns:
-        list: List of .bam files to process.
+    Returns
+    ----------
+    list: List of .bam files to process.
+
+    Raises
+    ----------
+    ValueError: If input_path is not a file or a directory.
     """
     # Check if input_path is a file or a directory
     if os.path.isfile(input_path):
@@ -62,6 +68,8 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
         else:
             if not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
                 raise ValueError(f"Output file path is not writable: {output_file}")
+
+    return True
 
 
 @click.command(

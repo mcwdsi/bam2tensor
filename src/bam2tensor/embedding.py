@@ -360,7 +360,9 @@ class GenomeMethylationEmbedding:
         if self.verbose:
             print("\tSaved windowed Cpg cache.")
 
-    def embedding_to_genomic_position(self, embedding: int) -> tuple[str, int]:
+    def embedding_to_genomic_position(
+        self, embedding: int | np.int64
+    ) -> tuple[str, int]:
         """Given an embedding position, return the chromosome and position.
 
         Args
