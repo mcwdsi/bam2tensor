@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "bam2tensor"
-version = "0.0.3"
+version = "0.0.4"
 description = "Bam2Tensor"
 authors = ["Nick Semenkovich <semenko@alum.mit.edu>"]
 license = "MIT"
