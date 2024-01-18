@@ -160,7 +160,7 @@ class GenomeMethylationEmbedding:
         """
 
         if self.verbose:
-            print(f"\n\tLoading all CpG sites for: {self.genome_name}")
+            print(f"\tLoading all CpG sites for: {self.genome_name}")
 
         if os.path.exists(self.cached_cpg_sites_json):
             if self.verbose:

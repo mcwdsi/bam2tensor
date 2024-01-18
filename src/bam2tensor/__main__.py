@@ -61,6 +61,28 @@ def main(
     print(f"Reference fasta: {reference_fasta}")
     print(f"Input path: {input_path}")
 
+    print(f"\nLoading (or generating) methylation embedding named: {reference_fasta}")
+
+    ## Globals
+    HG38_CHROMOSOMES = ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
+    # MM39_CHROMOSOMES = ["chr" + str(i) for i in range(1, 20)] + ["chrX", "chrY"]
+    # TEST_CHROMOSOMES = ["chr1"]
+
+    # dict: {chromosome: index}, e.g. {"chr1": 0, "chr2": 1, ...}
+    # CHROMOSOMES_DICT = {ch: idx for idx, ch in enumerate(CHROMOSOMES)}
+
+    # Create (or load) a GenomeMethylationEmbedding object
+    genome_methylation_embedding = GenomeMethylationEmbedding(
+        genome_name="hg38",
+        expected_chromosomes=HG38_CHROMOSOMES,
+        fasta_source=reference_fasta,
+        window_size=window_size,
+        skip_cache=skip_cache,
+        verbose=verbose,
+    )
+
+    print(f"\nTime elapsed: {time.time() - time_start:.2f} seconds")
+
     # Check if input_path is a file or a directory
     if os.path.isfile(input_path):
         bams_to_process = [input_path]
@@ -102,28 +124,6 @@ def main(
             assert os.access(
                 os.path.dirname(os.path.abspath(output_file)), os.W_OK
             ), f"Output file path is not writable: {output_file}"
-
-    print(f"\nLoading (or generating) methylation embedding named: {reference_fasta}")
-
-    ## Globals
-    HG38_CHROMOSOMES = ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
-    # MM39_CHROMOSOMES = ["chr" + str(i) for i in range(1, 20)] + ["chrX", "chrY"]
-    # TEST_CHROMOSOMES = ["chr1"]
-
-    # dict: {chromosome: index}, e.g. {"chr1": 0, "chr2": 1, ...}
-    # CHROMOSOMES_DICT = {ch: idx for idx, ch in enumerate(CHROMOSOMES)}
-
-    # Create (or load) a GenomeMethylationEmbedding object
-    genome_methylation_embedding = GenomeMethylationEmbedding(
-        genome_name="hg38",
-        expected_chromosomes=HG38_CHROMOSOMES,
-        fasta_source=reference_fasta,
-        window_size=window_size,
-        skip_cache=skip_cache,
-        verbose=verbose,
-    )
-
-    print(f"\nTime elapsed: {time.time() - time_start:.2f} seconds")
 
     #################################################
     # Operate over the input BAM files
