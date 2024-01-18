@@ -6,15 +6,15 @@
     "cookiecutter": {
       "project_name": "bam2tensor",
       "package_name": "bam2tensor",
-      "friendly_name": "Bam2Tensor",
+      "friendly_name": "bam2tensor",
       "copyright_owner": "Nick Semenkovich",
-      "copyright_year": "2023",
+      "copyright_year": "2023-2024",
       "author": "Nick Semenkovich",
       "email": "semenko@alum.mit.edu",
       "github_organization": "mcwdsi",
-      "version": "0.0.2",
+      "version": "0.0.4",
       "license": "MIT",
-      "development_status": "Development Status :: 1 - Planning",
+      "development_status": "Development Status :: 3 - Alpha",
       "code_quality_level": "Low",
       "_copy_without_render": [
         "*.rst_t"
