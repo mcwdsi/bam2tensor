@@ -1,7 +1,7 @@
 {
   "template": "https://github.com/statisticsnorway/ssb-pypitemplate.git",
-  "commit": "ade308e2279e8de90c4ba67d8148e984b3465d36",
-  "checkout": "2023.12.11",
+  "commit": "8a5c60c72f9395ee9f52edd62d5879212d1da14f",
+  "checkout": null,
   "context": {
     "cookiecutter": {
       "project_name": "bam2tensor",
