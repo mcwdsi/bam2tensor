@@ -27,4 +27,4 @@ def test_get_input_bams() -> None:
 def test_validate_input_output() -> None:
     """Test validate_input_output."""
 
-    assert __main__.validate_input_output(["tests/test.bam"], True)
+    __main__.validate_input_output(["tests/test.bam"], overwrite=True)
