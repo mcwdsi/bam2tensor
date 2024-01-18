@@ -136,3 +136,9 @@ dmypy.json
 /docs/_build/
 
 *.json
+
+# Ignore large bioinformatic files
+*.bam
+*.bai
+*.npz
+*.fna
