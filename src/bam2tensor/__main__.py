@@ -78,16 +78,26 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
     "--input-path",
     help="Input .bam file OR directory to recursively process.",
     required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=True, readable=True),
 )
 @click.option(
     "--genome-name",
-    help="Genome name (e.g. hg38, mm39, etc.)",
+    help="A custom string referring to your genome name, used to save a cache file (e.g. hg38, hg39-no-alt, etc.).",
     required=True,
+    type=str,
+)
+@click.option(
+    "--expected-chromosomes",
+    # Useful to filter out alt chromosomes, etc.
+    help="A comma-separated list of chromosomes to expect in the .fa genome. Defaults to hg38 chromosomes.",
+    required=False,
+    default=",".join(["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]),
 )
 @click.option(
     "--reference-fasta",
     help="Reference genome fasta file (critical to determine CpG sites).",
     required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, readable=True),
 )
 @click.option(
     "--quality-limit",
@@ -104,11 +114,13 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
     "--debug",
     help="Debug mode (extensive validity checking + debug messages).",
     is_flag=True,
+    type=bool,
 )
 @click.option("--overwrite", help="Overwrite output file if it exists.", is_flag=True)
 def main(
     input_path: str,
     genome_name: str,
+    expected_chromosomes: list,
     reference_fasta: str,
     quality_limit: int,
     window_size: int,
@@ -125,18 +137,14 @@ def main(
 
     print(f"\nLoading (or generating) methylation embedding named: {reference_fasta}")
 
-    ## Globals
-    HG38_CHROMOSOMES = ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
-    # MM39_CHROMOSOMES = ["chr" + str(i) for i in range(1, 20)] + ["chrX", "chrY"]
-    # TEST_CHROMOSOMES = ["chr1"]
-
-    # dict: {chromosome: index}, e.g. {"chr1": 0, "chr2": 1, ...}
-    # CHROMOSOMES_DICT = {ch: idx for idx, ch in enumerate(CHROMOSOMES)}
+    # Convert expected_chromosomes to a list
+    expected_chromosomes = expected_chromosomes.split(",")
+    print(f"\tExpected chromosomes: {expected_chromosomes}")
 
     # Create (or load) a GenomeMethylationEmbedding object
     genome_methylation_embedding = GenomeMethylationEmbedding(
         genome_name=genome_name,
-        expected_chromosomes=HG38_CHROMOSOMES,
+        expected_chromosomes=expected_chromosomes,
         fasta_source=reference_fasta,
         window_size=window_size,
         skip_cache=skip_cache,
