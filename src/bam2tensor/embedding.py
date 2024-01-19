@@ -95,9 +95,9 @@ class GenomeMethylationEmbedding:
             # Now generate windowed CpG sites for efficient querying of .bam files
             self.generate_windowed_cpg_sites()
 
-        if not skip_cache:
-            # Save the key & expensive objects to a cache
-            self.save_embedding_cache()
+            if not skip_cache:
+                # Save the key & expensive objects to a cache
+                self.save_embedding_cache()
 
         ## Generate objects for efficient lookups
         # A dict of chromosomes -> index for quick lookups (e.g. "chr1" -> 0)
@@ -165,11 +165,11 @@ class GenomeMethylationEmbedding:
         """
 
         if self.verbose:
-            print(f"\tLoading all CpG sites for: {self.genome_name}")
+            print(f"\tLoading embedding data for: {self.genome_name}")
 
         if os.path.exists(self.cache_file):
             if self.verbose:
-                print(f"\t\tReading CpG sites from cache: {self.cache_file}")
+                print(f"\t\tReading embedding from cache: {self.cache_file}")
 
             # TODO: Add type hinting via TypedDicts?
             # e.g. https://stackoverflow.com/questions/51291722/define-a-jsonable-type-using-mypy-pep-526
@@ -197,7 +197,7 @@ class GenomeMethylationEmbedding:
             }
 
         else:
-            raise FileNotFoundError("\tNo cache of CpG sites found.")
+            raise FileNotFoundError("\tNo cache of embedding found.")
 
         return True
 
