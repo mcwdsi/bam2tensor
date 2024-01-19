@@ -111,7 +111,6 @@ class GenomeMethylationEmbedding:
             print(f"\t\tTotal CpG sites: {self.total_cpg_sites:,}")
 
         # Create a dictionary of chromosome -> CpG site -> index (embedding) for efficient lookup
-        print(self.cpg_sites_dict.keys())
         self.chr_to_cpg_to_embedding_dict = {
             ch: {cpg: idx for idx, cpg in enumerate(self.cpg_sites_dict[ch])}
             for ch in self.expected_chromosomes
