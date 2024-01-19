@@ -132,13 +132,11 @@ def main(
     """Bam2Tensor."""
     time_start = time.time()
     # Print run information
+    print(f"Genome name: {genome_name}")
     print(f"Reference fasta: {reference_fasta}")
+    print(f"Expected chromosomes: {expected_chromosomes}")
     print(f"Input path: {input_path}")
-
-    print(f"\nLoading (or generating) methylation embedding named: {reference_fasta}")
-
-    # Convert expected_chromosomes to a list
-    print(f"\tExpected chromosomes: {expected_chromosomes}")
+    print(f"\nLoading (or generating) methylation embedding for: {genome_name}")
 
     # Create (or load) a GenomeMethylationEmbedding object
     genome_methylation_embedding = GenomeMethylationEmbedding(

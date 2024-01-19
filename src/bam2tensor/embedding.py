@@ -84,6 +84,12 @@ class GenomeMethylationEmbedding:
         if not skip_cache:
             try:
                 cache_available = self.load_embedding_cache()
+                assert (
+                    expected_chromosomes == self.expected_chromosomes
+                ), "Expected chromosomes do not match cached chromosomes!"
+                assert (
+                    window_size == self.window_size
+                ), "Window size does not match cached window size!"
             except FileNotFoundError as e:
                 if self.verbose:
                     print("Could not load methylation embedding from cache: " + str(e))
@@ -108,7 +114,10 @@ class GenomeMethylationEmbedding:
         # How many CpG sites are there?
         self.total_cpg_sites = sum([len(v) for v in self.cpg_sites_dict.values()])
         if self.verbose:
-            print(f"\t\tTotal CpG sites: {self.total_cpg_sites:,}")
+            print(f"\tTotal CpG sites: {self.total_cpg_sites:,}")
+            print(
+                f"\tTotal number of windows (at window_size = {self.window_size}): {len(self.windowed_cpg_sites_dict):,}"
+            )
 
         # Create a dictionary of chromosome -> CpG site -> index (embedding) for efficient lookup
         self.chr_to_cpg_to_embedding_dict = {
@@ -127,7 +136,7 @@ class GenomeMethylationEmbedding:
         )
 
         if verbose:
-            print(f"Loaded methylation embedding for: {self.genome_name}")
+            print("Loaded methylation embedding.")
 
     def save_embedding_cache(self):
         """Save a cache of expensive objects as our methylation embedding."""
@@ -163,12 +172,9 @@ class GenomeMethylationEmbedding:
             If the cached CpG site file cannot be found.
         """
 
-        if self.verbose:
-            print(f"\tLoading embedding data for: {self.genome_name}")
-
         if os.path.exists(self.cache_file):
             if self.verbose:
-                print(f"\t\tReading embedding from cache: {self.cache_file}")
+                print(f"\tReading embedding from cache: {self.cache_file}")
 
             # TODO: Add type hinting via TypedDicts?
             # e.g. https://stackoverflow.com/questions/51291722/define-a-jsonable-type-using-mypy-pep-526
@@ -195,8 +201,10 @@ class GenomeMethylationEmbedding:
                 ].items()
             }
 
+            if self.verbose:
+                print(f"\tCached genome fasta source: {self.fasta_source}")
         else:
-            raise FileNotFoundError("\tNo cache of embedding found.")
+            raise FileNotFoundError("No cache of embedding found.")
 
         return True
 
