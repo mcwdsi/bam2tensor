@@ -120,7 +120,7 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
 def main(
     input_path: str,
     genome_name: str,
-    expected_chromosomes: list,
+    expected_chromosomes: str,
     reference_fasta: str,
     quality_limit: int,
     window_size: int,
@@ -138,13 +138,12 @@ def main(
     print(f"\nLoading (or generating) methylation embedding named: {reference_fasta}")
 
     # Convert expected_chromosomes to a list
-    expected_chromosomes = expected_chromosomes.split(",")
     print(f"\tExpected chromosomes: {expected_chromosomes}")
 
     # Create (or load) a GenomeMethylationEmbedding object
     genome_methylation_embedding = GenomeMethylationEmbedding(
         genome_name=genome_name,
-        expected_chromosomes=expected_chromosomes,
+        expected_chromosomes=expected_chromosomes.split(","),
         fasta_source=reference_fasta,
         window_size=window_size,
         skip_cache=skip_cache,

@@ -23,8 +23,8 @@ class GenomeMethylationEmbedding:
 
     def __init__(
         self,
-        genome_name,
-        expected_chromosomes,
+        genome_name: str,
+        expected_chromosomes: list[str],
         fasta_source: str,
         window_size: int = 150,
         skip_cache: bool = False,
