@@ -78,7 +78,7 @@ def test_embedding_to_genomic_position() -> None:
         ) == ("chr3", embedding_obj.cpg_sites_dict["chr3"][-1])
 
 
-def genomic_position_to_embedding() -> None:
+def test_genomic_position_to_embedding() -> None:
     """Test genomic_position_to_embedding."""
 
     for embedding_obj in TEST_EMBEDDINGS:
