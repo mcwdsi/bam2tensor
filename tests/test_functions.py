@@ -25,3 +25,17 @@ def test_extract_methylation_data_from_bam() -> None:
 
     # Need to make a better test bam & fa pair...
     assert test_coo_matrix.shape == (1, 37489)
+
+
+def test_extract_methylation_data_from_bam_debug() -> None:
+    """Test extract_methylation_data_from_bam with debug flag set."""
+
+    test_coo_matrix = functions.extract_methylation_data_from_bam(
+        input_bam="tests/test.bam",
+        genome_methylation_embedding=TEST_EMBEDDING,
+        quality_limit=20,
+        verbose=True,
+        debug=True,
+    )
+
+    assert test_coo_matrix.shape == (1, 37489)

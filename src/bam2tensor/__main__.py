@@ -46,25 +46,20 @@ def get_input_bams(input_path: str) -> list:
 def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
     """Validate the input and output files."""
 
-    # Check input/output validity
     for bam_file in bams_to_process:
         if not os.access(bam_file, os.R_OK):
             raise ValueError(f"Input file is not readable: {bam_file}")
 
         output_file = os.path.splitext(bam_file)[0] + ".methylation.npz"
-        # Check if the output files exist or are writable
         if os.path.exists(output_file):
-            if overwrite:
+            if overwrite and os.access(output_file, os.W_OK):
                 print(
                     "\t\tOutput file exists and --overwrite specified. Will overwrite existing .methylation.npz file."
                 )
-                if not os.access(output_file, os.W_OK):
-                    raise ValueError(f"Output file is not writable: {output_file}")
             else:
                 raise ValueError(
-                    f"Output file exists and --overwrite not specified: {output_file}"
+                    f"Output file exists and --overwrite not specified or not writable: {output_file}"
                 )
-        # Otherwise, check the path is writable
         else:
             if not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
                 raise ValueError(f"Output file path is not writable: {output_file}")

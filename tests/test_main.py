@@ -28,3 +28,25 @@ def test_validate_input_output() -> None:
     """Test validate_input_output."""
 
     __main__.validate_input_output(["tests/test.bam"], overwrite=True)
+
+
+def test_main(runner: CliRunner) -> None:
+    """Test main() call, which runs everything, with some accepted defaults."""
+
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            "tests/test.bam",
+            "--overwrite",
+            "--reference-fasta",
+            "tests/test_fasta.fa",
+            "--genome-name",
+            "test",
+            "--expected-chromosomes",
+            "chr1,chr2,chr3",
+        ],
+    )
+
+    print(result.output)
+    assert result.exit_code == 0, f"Failed with: {result.output}"
