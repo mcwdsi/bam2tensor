@@ -386,6 +386,6 @@ class GenomeMethylationEmbedding:
         cpg_index = self.chr_to_cpg_to_embedding_dict[chrom][pos]
         # If this is the first chromosome, the embedding position is just the CpG index
         if chr_index == 0:
-            return cpg_index
+            return int(cpg_index)
         # Otherwise, add the length of the previous chromosomes to the CpG index
-        return cpg_index + self.cpgs_per_chr_cumsum[chr_index - 1]  # type: ignore
+        return int(cpg_index + self.cpgs_per_chr_cumsum[chr_index - 1])
