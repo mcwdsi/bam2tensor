@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "bam2tensor"
-version = "1.0.1"
+version = "1.1"
 description = "Bam2Tensor"
 authors = ["Nick Semenkovich <semenko@alum.mit.edu>"]
 license = "MIT"
@@ -8,7 +8,7 @@ readme = "README.md"
 homepage = "https://github.com/mcwdsi/bam2tensor"
 repository = "https://github.com/mcwdsi/bam2tensor"
 documentation = "https://mcwdsi.github.io/bam2tensor"
-classifiers = ["Development Status :: 3 - Alpha"]
+classifiers = ["Development Status :: 4 - Beta"]
 
 [tool.poetry.urls]
 Changelog = "https://github.com/mcwdsi/bam2tensor/releases"
