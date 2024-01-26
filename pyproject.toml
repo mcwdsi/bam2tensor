@@ -54,6 +54,7 @@ tests = ["tests", "*/tests"]
 [tool.coverage.run]
 branch = true
 source = ["bam2tensor", "tests"]
+relative_files = true
 
 [tool.coverage.report]
 show_missing = true
@@ -72,18 +73,6 @@ force-exclude = true  # Apply excludes to pre-commit
 show-fixes = true
 src = ["src", "tests"]
 target-version = "py39"  # Minimum Python version supported
-
-# Ruff rules may be customized as desired: https://docs.astral.sh/ruff/rules/
-select = [
-    "E",    # pycodestyle
-    "F",    # pyflakes
-]
-ignore = [
-    "ANN101", # Supress missing-type-self.
-    "D100",   # Supress undocumented-public-module. Only doc of public api required.
-    "E402",   # Supress module-import-not-at-top-of-file, needed in jupyter notebooks.
-    "E501",   # Supress line-too-long warnings: trust black's judgement on this one.
-]
 include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
 extend-exclude = [
     "__pycache__",
@@ -93,27 +82,49 @@ extend-exclude = [
     "docs/conf.py",
 ]
 
-[tool.ruff.isort]
+# Ruff rules may be customized as desired: https://docs.astral.sh/ruff/rules/
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+]
+ignore = [
+    "ANN101", # Supress missing-type-self.
+    "ANN102", # Supress missing-type-cls.
+    "ANN202", # Don't requiere return type annotation for private functions.
+    "ANN401", # Allow type annotation with type Any.
+    "D100",   # Supress undocumented-public-module. Only doc of public api required.
+    "E402",   # Supress module-import-not-at-top-of-file, needed in jupyter notebooks.
+    "E501",   # Supress line-too-long warnings: trust black's judgement on this one.
+]
+
+[tool.ruff.lint.isort]
 force-single-line = true
 
-[tool.ruff.mccabe]
+[tool.ruff.lint.mccabe]
 max-complexity = 15
 
-[tool.ruff.pydocstyle]
+[tool.ruff.lint.pydocstyle]
 convention = "google"  # You can also use "numpy".
 
-[tool.ruff.pep8-naming]
+[tool.ruff.lint.pep8-naming]
 classmethod-decorators = ["classmethod", "validator", "root_validator", "pydantic.validator"]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "*/__init__.py" = ["F401"]
 "**/tests/*" = [
-    "S101",    # asserts are encouraged in pytest
-    "ANN201",  # return annotations don't add value for test functions
+    "ANN001",  # type annotations don't add value for test functions
+    "ANN002",  # type annotations don't add value for test functions
+    "ANN003",  # type annotations don't add value for test functions
+    "ANN201",  # type annotations don't add value for test functions
+    "ANN204",  # type annotations don't add value for test functions
+    "ANN205",  # type annotations don't add value for test functions
+    "ANN206",  # type annotations don't add value for test functions
     "D100",    # docstrings are overkill for test functions
     "D101",
     "D102",
     "D103",
+    "S101",    # asserts are encouraged in pytest
 ]
 
 [build-system]
