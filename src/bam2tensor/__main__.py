@@ -197,8 +197,8 @@ def main(
 
     if errors_list:
         print(f"\n{len(errors_list)} errors occurred during processing:")
-        for e in errors_list:
-            print(f"\t{e}")
+        for error in errors_list:
+            print(f"\t{error}")
 
     print("\nRun complete.")
 
