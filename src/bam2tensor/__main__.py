@@ -164,6 +164,7 @@ def main(
     # Operate over the input BAM files
     #################################################
 
+    errors_list = []
     for i, input_bam in enumerate(bams_to_process):
         time_bam = time.time()
         output_file = os.path.splitext(input_bam)[0] + ".methylation.npz"
@@ -172,13 +173,18 @@ def main(
         print(f"Processing BAM file {i+1} of {len(bams_to_process)}")
         print(f"\nExtracting methylation data from: {input_bam}")
 
-        methylation_data_coo = extract_methylation_data_from_bam(
-            input_bam=input_bam,
-            genome_methylation_embedding=genome_methylation_embedding,
-            quality_limit=quality_limit,
-            verbose=verbose,
-            debug=debug,
-        )
+        try:
+            methylation_data_coo = extract_methylation_data_from_bam(
+                input_bam=input_bam,
+                genome_methylation_embedding=genome_methylation_embedding,
+                quality_limit=quality_limit,
+                verbose=verbose,
+                debug=debug,
+            )
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            errors_list.append(e)
+            continue
 
         print(f"\nWriting methylation data to: {output_file}")
 
@@ -188,6 +194,11 @@ def main(
         # Report performance time
         print(f"\nTime for this bam: {time.time() - time_bam:.2f} seconds")
         print(f"\nTotal time elapsed: {time.time() - time_start:.2f} seconds")
+
+    if errors_list:
+        print(f"\n{len(errors_list)} errors occurred during processing:")
+        for e in errors_list:
+            print(f"\t{e}")
 
     print("\nRun complete.")
 
