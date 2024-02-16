@@ -172,7 +172,7 @@ def main(
 
         if os.path.exists(output_file) and not overwrite:
             print(
-                f"\tOutput file already exists and --overwrite not specified. Skipping {input_bam}."
+                "\tOutput file already exists and --overwrite not specified. Skipping this .bam."
             )
             skip_count += 1
             continue
@@ -204,9 +204,11 @@ def main(
         for error in errors_list:
             print(f"\t{error}")
 
-    print(f"\n{skip_count} .bam files were skipped due to existing output files.")
-
     print("\nRun complete.")
+    print(f"\n{len(bams_to_process) - skip_count} .bam files were processed.")
+    print(f"\t{skip_count} .bam files were skipped due to existing output files.")
+    print(f"\t{len(errors_list)} .bam files had errors (missing index files?).")
+    print(f"\nTotal time elapsed: {time.time() - time_start:.2f} seconds")
 
 
 if __name__ == "__main__":
