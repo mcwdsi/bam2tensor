@@ -95,6 +95,7 @@ class GenomeMethylationEmbedding:
                     print("Could not load methylation embedding from cache: " + str(e))
 
         if not cache_available:
+            print("\tNo cache available, generating fresh methylation embedding.")
             # Generate CpG sites if we don't have a cached embedding
             self.parse_fasta_for_cpg_sites()
 
@@ -104,6 +105,8 @@ class GenomeMethylationEmbedding:
             if not skip_cache:
                 # Save the key & expensive objects to a cache
                 self.save_embedding_cache()
+        else:
+            print(f"\tLoaded methylation embedding from cache: {self.cache_file}")
 
         ## Generate objects for efficient lookups
         # A dict of chromosomes -> index for quick lookups (e.g. "chr1" -> 0)

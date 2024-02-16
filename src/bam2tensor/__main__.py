@@ -56,10 +56,6 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
                 print(
                     "\t\tOutput file exists and --overwrite specified. Will overwrite existing .methylation.npz file."
                 )
-            else:
-                raise ValueError(
-                    f"Output file exists and --overwrite not specified or not writable: {output_file}"
-                )
         else:
             if not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
                 raise ValueError(f"Output file path is not writable: {output_file}")
@@ -165,6 +161,7 @@ def main(
     #################################################
 
     errors_list = []
+    skip_count = 0
     for i, input_bam in enumerate(bams_to_process):
         time_bam = time.time()
         output_file = os.path.splitext(input_bam)[0] + ".methylation.npz"
@@ -172,6 +169,13 @@ def main(
         print("\n" + "=" * 80)
         print(f"Processing BAM file {i+1} of {len(bams_to_process)}")
         print(f"\nExtracting methylation data from: {input_bam}")
+
+        if os.path.exists(output_file) and not overwrite:
+            print(
+                f"\tOutput file already exists and --overwrite not specified. Skipping {input_bam}."
+            )
+            skip_count += 1
+            continue
 
         try:
             methylation_data_coo = extract_methylation_data_from_bam(
@@ -181,7 +185,7 @@ def main(
                 verbose=verbose,
                 debug=debug,
             )
-        except FileNotFoundError as e:
+        except FileNotFoundError as e:  # Likely no .bam index file
             print(f"Error: {e}")
             errors_list.append(e)
             continue
@@ -199,6 +203,8 @@ def main(
         print(f"\n{len(errors_list)} errors occurred during processing:")
         for error in errors_list:
             print(f"\t{error}")
+
+    print(f"\n{skip_count} .bam files were skipped due to existing output files.")
 
     print("\nRun complete.")
 
