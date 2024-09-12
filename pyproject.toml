@@ -14,7 +14,7 @@ classifiers = ["Development Status :: 4 - Beta"]
 Changelog = "https://github.com/mcwdsi/bam2tensor/releases"
 
 [tool.poetry.dependencies]
-python = ">=3.9,<4.0"
+python = ">=3.10"
 click = ">=8.0.1"
 numpy = ">=1.26.2"
 scipy = ">=1.11.4"
@@ -72,7 +72,7 @@ ignore_missing_imports = true
 force-exclude = true  # Apply excludes to pre-commit
 show-fixes = true
 src = ["src", "tests"]
-target-version = "py39"  # Minimum Python version supported
+target-version = "py310"  # Minimum Python version supported
 include = ["*.py", "*.pyi", "**/pyproject.toml", "*.ipynb"]
 extend-exclude = [
     "__pycache__",
