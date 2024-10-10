@@ -1,7 +1,7 @@
 # Import modules
-import click
 import os
 import time
+import click
 
 # Third party modules
 import scipy.sparse
