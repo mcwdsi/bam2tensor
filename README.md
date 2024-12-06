@@ -65,6 +65,7 @@ In the COO matrix, each row represents a read and each column represents a CpG s
 - Consider storing a Read ID: Row ID mapping?
 - Export / more stably store & import embedding mapping? (.npz or other instead of .json?)
 - Store metadata / object reference in .npz file?
+- Explore using Xarray or [Sparse](https://sparse.pydata.org/en/stable/)?
 
 ## Contributing
 
