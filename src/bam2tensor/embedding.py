@@ -18,7 +18,7 @@ class GenomeMethylationEmbedding:
     This class helps identify CpG sites in a given .fasta file and stores
     methylation embedding information for each CpG site for analyzing .bam files.
 
-    Stored embedding information cached and stored in gzipped json files.
+    Stored embedding information is cached and stored in gzipped json files.
     """
 
     def __init__(
@@ -65,7 +65,7 @@ class GenomeMethylationEmbedding:
         # Store the CpG sites in a dict per chromosome
         self.cpg_sites_dict: dict[str, list[int]] = {}
 
-        # This is a dict of lists, where but each list contains a tuple of CpG ranges witin a window
+        # This is a dict of lists, where each list contains a tuple of CpG ranges within a window
         # Key: chromosome, e.g. "chr1"
         # Value: a list of tuples, e.g. [(0,35), (190,212), (1055,)]
         self.windowed_cpg_sites_dict: dict[str, list[tuple]] = {}
@@ -340,7 +340,7 @@ class GenomeMethylationEmbedding:
         Args
         ----------
         embedding_pos : int
-            The embedding position.
+            The embedding position, e.g. 3493
 
         Returns
         -------
