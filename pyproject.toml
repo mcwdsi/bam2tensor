@@ -20,7 +20,7 @@ numpy = ">=1.26.2"
 scipy = ">=1.11.4"
 tqdm = ">=4.66.1"
 biopython = ">=1.81"
-pysam = "^0.22.0"
+pysam = ">=0.22.0"
 
 [tool.poetry.group.dev.dependencies]
 pygments = ">=2.10.0"
