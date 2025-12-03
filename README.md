@@ -40,7 +40,7 @@ bam2tensor is a Python package for converting .bam files to dense representation
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10+
 - pysam, numpy, scipy, tqdm
 
 ## Installation

@@ -16,7 +16,7 @@ Changelog = "https://github.com/mcwdsi/bam2tensor/releases"
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
 click = ">=8.0.1"
-numpy = ">=1.26.2"
+numpy = ">=1.26.0"
 scipy = ">=1.11.4"
 tqdm = ">=4.66.1"
 biopython = ">=1.81"
