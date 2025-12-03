@@ -81,6 +81,8 @@ def extract_methylation_data_from_bam(
                 continue
             if aligned_segment.is_secondary:
                 continue
+            if aligned_segment.is_supplementary:
+                continue
 
             # Use bisect to find CpGs covered by this read
             # aligned_segment.reference_start is 0-based inclusive
