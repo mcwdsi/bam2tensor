@@ -90,7 +90,9 @@ def extract_methylation_data_from_bam(
             # cpg_sites are 1-based
 
             # We want CpGs where: read_start < cpg_pos <= read_end (in 1-based terms: read_start+1 <= cpg <= read_end)
-            start_idx = bisect.bisect_left(cpg_sites, aligned_segment.reference_start + 1)
+            start_idx = bisect.bisect_left(
+                cpg_sites, aligned_segment.reference_start + 1
+            )
             end_idx = bisect.bisect_right(cpg_sites, aligned_segment.reference_end)
 
             # If no CpGs in this read, skip
@@ -189,16 +191,12 @@ def extract_methylation_data_from_bam(
                     # Methylated
                     coo_data.append(1)
                     if debug:
-                        print(
-                            f"\t{query_pos} {ref_pos} C->{query_base} [Methylated]"
-                        )
+                        print(f"\t{query_pos} {ref_pos} C->{query_base} [Methylated]")
                 elif query_base == "T":
                     coo_data.append(0)
                     # Unmethylated
                     if debug:
-                        print(
-                            f"\t{query_pos} {ref_pos} C->{query_base} [Unmethylated]"
-                        )
+                        print(f"\t{query_pos} {ref_pos} C->{query_base} [Unmethylated]")
                 else:
                     coo_data.append(-1)  # or just 0?
                     if debug:

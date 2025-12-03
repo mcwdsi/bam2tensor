@@ -184,8 +184,10 @@ class GenomeMethylationEmbedding:
             self.cpg_sites_dict = self.cache_data["cpg_sites_dict"]
 
             # Backwards compatibility for old caches or if needed
-            self.windowed_cpg_sites_dict = self.cache_data.get("windowed_cpg_sites_dict", {})
-            
+            self.windowed_cpg_sites_dict = self.cache_data.get(
+                "windowed_cpg_sites_dict", {}
+            )
+
             # This is to convert the keys back to integers, since JSON only supports strings as keys
             # Note that we want this on the second level keys '1234', not the first level keys 'chr1'
             if "windowed_cpg_sites_dict_reverse" in self.cache_data:
