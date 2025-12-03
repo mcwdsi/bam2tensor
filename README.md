@@ -25,7 +25,7 @@
 [black]: https://github.com/psf/black
 [poetry]: https://python-poetry.org/
 
-bam2tensor is a Python package for converting .bam files to dense representations of methylation data (as .npz NumPy arrays). It is designed to evaluate all CpG sites and store methylation states for loading into other deep learning pipelines.
+bam2tensor is a Python package for converting .bam files to sparse representations of methylation data (as .npz NumPy arrays). It is designed to evaluate all CpG sites and store methylation states for loading into other deep learning pipelines.
 
 ![bam2tensor logo](https://raw.githubusercontent.com/mcwdsi/bam2tensor/main/docs/logo/bam2tensor-logo.png)
 
@@ -36,7 +36,8 @@ bam2tensor is a Python package for converting .bam files to dense representation
 - Supports any genome (Hg38, T2T-CHM13, mm10, etc.)
 - Stores data in sparse format (COO matrix) for efficient loading
 - Exports methylation data to .npz NumPy arrays
-- Easily parallelizable
+- Efficient linear-scan algorithm ensures minimal memory usage and guarantees no read duplication
+- File-level parallelization (process multiple BAMs concurrently)
 
 ## Requirements
 
@@ -59,13 +60,7 @@ Please see the [Reference Guide] for full details.
 
 One `.npz` file is generated for each separate `.bam`, which can be loaded using `scipy.sparse.load_npz()`. Each `.npz` file contains a single sparse SciPy [COO matrix].
 
-In the COO matrix, each row represents a read and each column represents a CpG site. The value at each row/column is the methylation state (`0` = unmethylated, `1` = methylated, `-1` = no data). Note that `-1` can represent indels or point mutations.
-
-## Todo
-- Consider storing a Read ID: Row ID mapping?
-- Export / more stably store & import embedding mapping? (.npz or other instead of .json?)
-- Store metadata / object reference in .npz file?
-- Explore using Xarray or [Sparse](https://sparse.pydata.org/en/stable/)?
+In the COO matrix, each row represents a unique read (primary alignment) and each column represents a CpG site. The value at each row/column is the methylation state (`0` = unmethylated, `1` = methylated, `-1` = no data). Note that `-1` can represent indels or point mutations.
 
 ## Contributing
 

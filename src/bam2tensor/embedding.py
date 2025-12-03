@@ -3,7 +3,6 @@
 import gzip
 import json
 import os
-from typing import Union  # Remove when dropping Python 3.9
 
 # Third party modules
 import numpy as np
@@ -268,7 +267,7 @@ class GenomeMethylationEmbedding:
             print(f"\tFound {len(self.cpg_sites_dict)} chromosomes in reference fasta.")
 
     def embedding_to_genomic_position(
-        self, embedding: Union[int, np.int64]
+        self, embedding: int | np.int64
     ) -> tuple[str, int]:
         """Given an embedding position, return the chromosome and position.
 
