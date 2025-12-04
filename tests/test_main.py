@@ -115,3 +115,32 @@ def test_main_skip_existing(runner: CliRunner, tmp_path) -> None:
 
     assert result.exit_code == 0
     assert "Skipping this .bam" in result.output or "skipped" in result.output.lower()
+
+
+def test_main_missing_bam_index(runner: CliRunner, tmp_path) -> None:
+    """Test main handles missing BAM index file gracefully (reports error)."""
+    import shutil
+
+    # Copy BAM file but NOT the index
+    shutil.copy("tests/test.bam", tmp_path / "no_index.bam")
+    # Don't copy the .bai file
+
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            str(tmp_path / "no_index.bam"),
+            "--reference-fasta",
+            "tests/test_fasta.fa",
+            "--genome-name",
+            "test",
+            "--expected-chromosomes",
+            "chr1,chr2,chr3",
+            "--overwrite",
+        ],
+    )
+
+    # The main function catches FileNotFoundError and reports it
+    assert result.exit_code == 0  # Should complete (with errors logged)
+    assert "Error" in result.output or "error" in result.output.lower()
+    assert "1 errors occurred" in result.output or "had errors" in result.output

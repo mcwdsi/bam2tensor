@@ -198,3 +198,46 @@ def test_cache_window_size_mismatch(tmp_path) -> None:
             )
     finally:
         os.chdir(original_cwd)
+
+
+def test_cache_not_found_verbose(tmp_path, capsys) -> None:
+    """Test verbose message when cache file not found."""
+    original_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        # Create embedding with verbose=True and no existing cache
+        embedding.GenomeMethylationEmbedding(
+            "no_cache_test",
+            expected_chromosomes=["chr1", "chr2", "chr3"],
+            fasta_source=os.path.join(original_cwd, "tests/test_fasta.fa"),
+            window_size=150,
+            skip_cache=False,
+            verbose=True,
+        )
+        captured = capsys.readouterr()
+        # The verbose message about cache not found should appear
+        assert "Could not load" in captured.out or "No cache available" in captured.out
+    finally:
+        os.chdir(original_cwd)
+
+
+def test_save_cache_verbose(tmp_path, capsys) -> None:
+    """Test verbose messages when saving cache."""
+    original_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        # Create embedding with verbose=True (will save cache)
+        embedding.GenomeMethylationEmbedding(
+            "verbose_save_test",
+            expected_chromosomes=["chr1", "chr2", "chr3"],
+            fasta_source=os.path.join(original_cwd, "tests/test_fasta.fa"),
+            window_size=150,
+            skip_cache=False,
+            verbose=True,
+        )
+        captured = capsys.readouterr()
+        # Check for verbose save messages
+        assert "Saving embedding to cache" in captured.out
+        assert "Saved embedding cache" in captured.out
+    finally:
+        os.chdir(original_cwd)
