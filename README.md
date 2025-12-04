@@ -27,7 +27,7 @@
 
 bam2tensor is a Python package for converting .bam files to sparse representations of methylation data (as .npz NumPy arrays). It is designed to evaluate all CpG sites and store methylation states for loading into other deep learning pipelines.
 
-![bam2tensor logo](https://raw.githubusercontent.com/mcwdsi/bam2tensor/main/docs/logo/bam2tensor-logo.png)
+![bam2tensor overview figure](https://raw.githubusercontent.com/mcwdsi/bam2tensor/main/docs/nano-banana-overview-shrunk.png)
 
 
 ## Features
