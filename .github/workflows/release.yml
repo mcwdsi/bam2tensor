@@ -43,16 +43,23 @@ jobs:
         run: |
           echo "sha=$(git rev-parse --verify --quiet HEAD^)" >> $GITHUB_OUTPUT
 
+      - name: Check if this is a tag push
+        id: check-tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Detect and tag new version
         id: check-version
-        if: steps.check-parent-commit.outputs.sha
+        if: steps.check-parent-commit.outputs.sha && !steps.check-tag.outputs.tag
         uses: salsify/action-detect-and-tag-new-version@v2.0.3
         with:
           version-command: |
             bash -o pipefail -c "poetry version | cut -f 2 -d' '"
 
       - name: Bump version for developmental release
-        if: (!steps.check-version.outputs.tag)
+        if: (!steps.check-version.outputs.tag && !steps.check-tag.outputs.tag)
         run: |
           poetry version patch &&
           version=$(poetry version | awk '{ print $2 }') &&
@@ -63,11 +70,11 @@ jobs:
           poetry build --ansi
 
       - name: Publish package on PyPI
-        if: steps.check-version.outputs.tag
+        if: steps.check-version.outputs.tag || steps.check-tag.outputs.tag
         uses: pypa/gh-action-pypi-publish@v1.13.0
 
       - name: Publish package on TestPyPI
-        if: (!steps.check-version.outputs.tag)
+        if: (!steps.check-version.outputs.tag && !steps.check-tag.outputs.tag)
         uses: pypa/gh-action-pypi-publish@v1.13.0
         with:
           repository-url: https://test.pypi.org/legacy/
@@ -75,7 +82,7 @@ jobs:
       - name: Publish the release notes
         uses: release-drafter/release-drafter@v6.1.0
         with:
-          publish: ${{ steps.check-version.outputs.tag != '' }}
-          tag: ${{ steps.check-version.outputs.tag }}
+          publish: ${{ steps.check-version.outputs.tag != '' || steps.check-tag.outputs.tag != '' }}
+          tag: ${{ steps.check-version.outputs.tag || steps.check-tag.outputs.tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
