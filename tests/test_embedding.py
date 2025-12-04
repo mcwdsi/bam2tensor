@@ -1,3 +1,5 @@
+import os
+import pytest
 from bam2tensor import embedding
 
 # Generate a fresh, uncached embedding
@@ -108,3 +110,91 @@ def test_genomic_position_to_embedding() -> None:
             )
             == embedding_obj.cpgs_per_chr_cumsum[-1] - 1
         )
+
+
+def test_empty_chromosomes_raises_error() -> None:
+    """Test that empty expected_chromosomes raises ValueError."""
+    with pytest.raises(ValueError, match="Expected chromosomes cannot be empty"):
+        embedding.GenomeMethylationEmbedding(
+            "test_genome",
+            expected_chromosomes=[],
+            fasta_source="tests/test_fasta.fa",
+            window_size=150,
+            skip_cache=True,
+            verbose=False,
+        )
+
+
+def test_missing_fasta_raises_error() -> None:
+    """Test that missing fasta file raises FileNotFoundError."""
+    with pytest.raises(FileNotFoundError, match="Cannot read fasta file"):
+        embedding.GenomeMethylationEmbedding(
+            "test_genome",
+            expected_chromosomes=["chr1"],
+            fasta_source="/nonexistent/file.fa",
+            window_size=150,
+            skip_cache=True,
+            verbose=False,
+        )
+
+
+def test_cache_chromosome_mismatch(tmp_path) -> None:
+    """Test that mismatched chromosomes between cache and request raises AssertionError."""
+    # First create a cache with chr1,chr2,chr3
+    cache_file = tmp_path / "mismatch_test.cache.json.gz"
+
+    # Create embedding with original chromosomes (creates cache)
+    original_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        embedding.GenomeMethylationEmbedding(
+            "mismatch_test",
+            expected_chromosomes=["chr1", "chr2", "chr3"],
+            fasta_source=os.path.join(original_cwd, "tests/test_fasta.fa"),
+            window_size=150,
+            skip_cache=False,
+            verbose=False,
+        )
+        assert cache_file.exists()
+
+        # Now try to load with different chromosomes - should raise AssertionError
+        with pytest.raises(AssertionError, match="Expected chromosomes do not match"):
+            embedding.GenomeMethylationEmbedding(
+                "mismatch_test",
+                expected_chromosomes=["chr1"],  # Different!
+                fasta_source=os.path.join(original_cwd, "tests/test_fasta.fa"),
+                window_size=150,
+                skip_cache=False,
+                verbose=False,
+            )
+    finally:
+        os.chdir(original_cwd)
+
+
+def test_cache_window_size_mismatch(tmp_path) -> None:
+    """Test that mismatched window_size between cache and request raises AssertionError."""
+    original_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        # Create embedding with window_size=150 (creates cache)
+        embedding.GenomeMethylationEmbedding(
+            "window_test",
+            expected_chromosomes=["chr1", "chr2", "chr3"],
+            fasta_source=os.path.join(original_cwd, "tests/test_fasta.fa"),
+            window_size=150,
+            skip_cache=False,
+            verbose=False,
+        )
+
+        # Now try to load with different window_size - should raise AssertionError
+        with pytest.raises(AssertionError, match="Window size does not match"):
+            embedding.GenomeMethylationEmbedding(
+                "window_test",
+                expected_chromosomes=["chr1", "chr2", "chr3"],
+                fasta_source=os.path.join(original_cwd, "tests/test_fasta.fa"),
+                window_size=200,  # Different!
+                skip_cache=False,
+                verbose=False,
+            )
+    finally:
+        os.chdir(original_cwd)
