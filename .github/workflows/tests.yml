@@ -63,6 +63,11 @@ jobs:
           pipx inject --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" nox nox-poetry
           nox --version
 
+      - name: Install uv
+        run: |
+          pipx install uv
+          uv --version
+
       - name: Compute pre-commit cache key
         if: matrix.session == 'pre-commit'
         id: pre-commit-cache
