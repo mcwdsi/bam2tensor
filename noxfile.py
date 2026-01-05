@@ -157,20 +157,30 @@ def tests(session: Session) -> None:
     """Run the test suite."""
     session.install(".")
     session.install("coverage[toml]", "pytest", "pygments")
-    try:
+    # Skip coverage on Python 3.13 due to pysam bug with coverage tracing
+    # See: https://github.com/pysam-developers/pysam/issues/1350
+    if session.python == "3.13":
         session.run(
-            "coverage",
-            "run",
-            "--parallel",
-            "-m",
             "pytest",
             "-o",
             "pythonpath=",
             *session.posargs,
         )
-    finally:
-        if session.interactive:
-            session.notify("coverage", posargs=[])
+    else:
+        try:
+            session.run(
+                "coverage",
+                "run",
+                "--parallel",
+                "-m",
+                "pytest",
+                "-o",
+                "pythonpath=",
+                *session.posargs,
+            )
+        finally:
+            if session.interactive:
+                session.notify("coverage", posargs=[])
 
 
 @session(python=python_versions[0])
