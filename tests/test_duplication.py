@@ -45,7 +45,7 @@ def test_duplication_bug(tmp_path):
         a.reference_id = 0
         a.reference_start = 0
         a.mapping_quality = 60
-        a.cigar = [(0, len(seq))]  # 150M
+        a.cigartuples = [(0, len(seq))]  # 150M
         # Add tags to pass filters
         a.set_tag("MD", "150")
         a.set_tag("YD", "f")  # Bisulfite strand
