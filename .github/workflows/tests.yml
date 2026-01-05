@@ -143,6 +143,11 @@ jobs:
           pipx inject --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" nox nox-poetry
           nox --version
 
+      - name: Install uv
+        run: |
+          pipx install uv
+          uv --version
+
       - name: Download coverage data
         uses: actions/download-artifact@v7
         with:
