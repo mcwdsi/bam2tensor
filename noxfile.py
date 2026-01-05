@@ -9,6 +9,8 @@ from textwrap import dedent
 
 import nox
 
+# Use uv for faster virtual environment creation
+nox.options.default_venv_backend = "uv"
 
 try:
     from nox_poetry import Session

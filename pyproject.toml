@@ -61,6 +61,7 @@ show_missing = true
 fail_under = 10
 
 [tool.mypy]
+check_untyped_defs = false  # TODO: set true
 strict = false
 warn_unreachable = true
 pretty = true
