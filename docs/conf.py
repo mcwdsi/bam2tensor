@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.abspath("../src"))
 # -- Project information -----------------------------------------------------
 
 project = "Bam2Tensor"
-copyright = "2023, Nick Semenkovich"
+copyright = "2023-2026, Nick Semenkovich"
 author = "Nick Semenkovich"
 
 # -- General configuration ---------------------------------------------------

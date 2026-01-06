@@ -1,7 +1,4 @@
 ```{include} ../README.md
----
-end-before: <!-- github-only -->
----
 ```
 
 [license]: license
@@ -16,7 +13,6 @@ maxdepth: 1
 
 reference
 contributing
-Code of Conduct <codeofconduct>
 License <license>
 Changelog <https://github.com/mcwdsi/bam2tensor/releases>
 ```
