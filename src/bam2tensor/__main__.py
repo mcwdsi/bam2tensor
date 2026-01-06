@@ -1,9 +1,27 @@
-# Import modules
+"""Command-line interface for bam2tensor.
+
+This module provides the CLI entry point for bam2tensor, allowing users to
+extract methylation data from BAM files via the command line.
+
+Example:
+    Basic usage with a single BAM file::
+
+        $ bam2tensor --input-path sample.bam --reference-fasta ref.fa --genome-name hg38
+
+    Process all BAM files in a directory::
+
+        $ bam2tensor --input-path /path/to/bams/ --reference-fasta ref.fa --genome-name hg38
+
+    With verbose output and custom quality threshold::
+
+        $ bam2tensor --input-path sample.bam --reference-fasta ref.fa \\
+            --genome-name hg38 --quality-limit 30 --verbose
+"""
+
 import os
 import time
 import click
 
-# Third party modules
 import scipy.sparse
 
 from bam2tensor.embedding import GenomeMethylationEmbedding
@@ -14,19 +32,33 @@ from bam2tensor.functions import (
 
 
 def get_input_bams(input_path: str) -> list:
-    """Determine if the input is a path or file, and return a list of .bam files to process.
+    """Find all BAM files to process from a given input path.
 
-    Args
-    ----------
-    input_path (str): Input path or file.
+    Determines whether the input is a single BAM file or a directory,
+    and returns a list of BAM file paths to process. If a directory
+    is provided, it recursively searches for all files with a .bam
+    extension.
 
-    Returns
-    ----------
-    list: List of .bam files to process.
+    Args:
+        input_path: Path to a single .bam file or a directory containing
+            BAM files. Directories are searched recursively.
 
-    Raises
-    ----------
-    ValueError: If input_path is not a file or a directory.
+    Returns:
+        A list of absolute paths to .bam files to process. If input_path
+        is a single file, returns a single-element list. If input_path
+        is a directory, returns all .bam files found recursively.
+
+    Raises:
+        ValueError: If input_path does not exist or is neither a file
+            nor a directory.
+
+    Example:
+        >>> get_input_bams("/path/to/sample.bam")
+        ['/path/to/sample.bam']
+
+        >>> get_input_bams("/path/to/bam_directory/")
+        ['/path/to/bam_directory/sample1.bam',
+         '/path/to/bam_directory/subdir/sample2.bam']
     """
     # Check if input_path is a file or a directory
     if os.path.isfile(input_path):
@@ -44,7 +76,26 @@ def get_input_bams(input_path: str) -> list:
 
 
 def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
-    """Validate the input and output files."""
+    """Validate that input BAM files are readable and output paths are writable.
+
+    Checks each BAM file in the list to ensure it can be read, and verifies
+    that the corresponding output .methylation.npz file can be written.
+    Prints warnings if output files already exist and --overwrite is specified.
+
+    Args:
+        bams_to_process: List of paths to BAM files to validate.
+        overwrite: If True, allows overwriting existing output files.
+            If False and an output file exists, it will be skipped during
+            processing (not validated here).
+
+    Raises:
+        ValueError: If any input BAM file is not readable, or if the
+            output directory is not writable.
+
+    Note:
+        Output files are named by replacing the .bam extension with
+        .methylation.npz (e.g., sample.bam -> sample.methylation.npz).
+    """
 
     for bam_file in bams_to_process:
         if not os.access(bam_file, os.R_OK):
@@ -116,7 +167,42 @@ def main(
     debug: bool,
     overwrite: bool,
 ) -> None:
-    """Bam2Tensor."""
+    """Extract methylation data from BAM files and save as sparse matrices.
+
+    Main entry point for the bam2tensor CLI. Processes one or more BAM files,
+    extracting read-level CpG methylation data and saving the results as
+    SciPy sparse COO matrices in .npz format.
+
+    The workflow is:
+        1. Load or generate a CpG site index for the reference genome
+        2. Find all BAM files to process (single file or directory)
+        3. Validate input/output permissions
+        4. For each BAM file:
+           a. Extract methylation states from aligned reads
+           b. Build a sparse matrix (rows=reads, columns=CpG sites)
+           c. Save to .methylation.npz file
+
+    Args:
+        input_path: Path to a BAM file or directory to process recursively.
+        genome_name: Identifier for the genome (e.g., "hg38"). Used for
+            naming the CpG site cache file.
+        expected_chromosomes: Comma-separated list of chromosomes to process.
+            Chromosomes not in this list are skipped.
+        reference_fasta: Path to the reference genome FASTA file. Must match
+            the genome used for alignment.
+        quality_limit: Minimum mapping quality (MAPQ) threshold. Reads below
+            this quality are excluded.
+        verbose: If True, print detailed progress information.
+        skip_cache: If True, regenerate the CpG site index even if a cache
+            file exists.
+        debug: If True, enable extensive validation and debug output.
+        overwrite: If True, overwrite existing output files. Otherwise,
+            skip BAM files that already have output.
+
+    Note:
+        This function is decorated with Click options and is typically
+        invoked via the command line rather than called directly.
+    """
     time_start = time.time()
     # Print run information
     print(f"Genome name: {genome_name}")

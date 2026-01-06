@@ -1,6 +1,49 @@
-"""Core functions for bam2tensor."""
+"""Core methylation extraction functions for bam2tensor.
 
-# Third party modules
+This module contains the main function for extracting methylation data from
+BAM files: extract_methylation_data_from_bam(). This function reads aligned
+bisulfite-sequencing reads and generates a sparse matrix representation of
+methylation states at each CpG site.
+
+The extraction process:
+    1. Iterates through each chromosome in the genome embedding
+    2. For each aligned read that passes quality filters:
+       a. Identifies which CpG sites fall within the read's alignment
+       b. Determines the bisulfite strand (forward or reverse)
+       c. Extracts methylation state at each covered CpG
+    3. Builds a sparse COO matrix with the results
+
+Methylation State Encoding:
+    - 1: Methylated (cytosine remained as C after bisulfite treatment)
+    - 0: Unmethylated (cytosine converted to T by bisulfite treatment)
+    - -1: No data (indel, SNV, or other non-C/T base at CpG position)
+
+Supported Aligners:
+    The module supports BAM files from aligners that provide strand information:
+    - Biscuit: Uses the YD tag (f=forward, r=reverse)
+    - gem3/Blueprint: Uses the XB tag (C=forward, G=reverse)
+
+Example:
+    >>> from bam2tensor.embedding import GenomeMethylationEmbedding
+    >>> from bam2tensor.functions import extract_methylation_data_from_bam
+    >>>
+    >>> # Create genome embedding
+    >>> embedding = GenomeMethylationEmbedding(
+    ...     genome_name="hg38",
+    ...     expected_chromosomes=["chr1", "chr2"],
+    ...     fasta_source="reference.fa",
+    ... )
+    >>>
+    >>> # Extract methylation data
+    >>> matrix = extract_methylation_data_from_bam(
+    ...     input_bam="sample.bam",
+    ...     genome_methylation_embedding=embedding,
+    ...     quality_limit=20,
+    ... )
+    >>>
+    >>> print(f"Extracted {matrix.shape[0]} reads, {matrix.nnz} data points")
+"""
+
 import scipy.sparse
 import pysam
 import bisect
@@ -16,24 +59,90 @@ def extract_methylation_data_from_bam(
     verbose: bool = False,
     debug: bool = False,
 ) -> scipy.sparse.coo_matrix:
-    """
-    Extract methylation data from a .bam file.
+    """Extract read-level CpG methylation data from a BAM file.
 
-    Args
-    -------
-        input_bam: Path to the input .bam file.
-        quality_limit: Minimum mapping quality to include.
-        genome_methylation_embedding: A GenomeMethylationEmbedding object.
-        verbose: Print verbose output.
-        debug: Print debug output.
+    Parses a bisulfite-sequencing BAM file and extracts methylation states
+    at each CpG site covered by aligned reads. Returns a sparse matrix where
+    each row represents a unique read and each column represents a CpG site.
 
-    Returns
-    -------
-        A scipy.sparse.coo_matrix of the methylation data.
+    The function applies several filters to reads:
+        - Mapping quality must be >= quality_limit (default 20)
+        - Duplicate reads are excluded
+        - QC-failed reads are excluded
+        - Secondary and supplementary alignments are excluded
+        - Only reads on the bisulfite-converted parent strand are processed
 
-    Raises
-    -------
-        FileNotFoundError: If the input .bam file is not found.
+    For each qualifying read, the function:
+        1. Uses binary search to find CpG sites within the read's alignment
+        2. Checks the bisulfite strand tag (YD or XB) to determine strand
+        3. Extracts the base at each CpG position from the read sequence
+        4. Records methylation state: C=methylated(1), T=unmethylated(0), other=-1
+
+    Args:
+        input_bam: Path to the input BAM file. The file must be indexed
+            (have a corresponding .bam.bai file).
+        genome_methylation_embedding: A GenomeMethylationEmbedding object
+            that defines the CpG site positions and provides coordinate
+            conversion methods.
+        quality_limit: Minimum mapping quality (MAPQ) threshold for reads.
+            Reads with MAPQ below this value are skipped. Default is 20,
+            which excludes reads mapping to multiple locations equally well.
+        verbose: If True, display a progress bar and print the total read
+            count. Useful for monitoring progress on large files.
+        debug: If True, enable extensive validation and debug output.
+            Prints per-read information and validates that each read is
+            only processed once. Significantly slower.
+
+    Returns:
+        A scipy.sparse.coo_matrix with shape (n_reads, n_cpg_sites) where:
+            - n_reads is the number of reads that passed filters and covered
+              at least one CpG site
+            - n_cpg_sites is genome_methylation_embedding.total_cpg_sites
+            - Values are: 1 (methylated), 0 (unmethylated), -1 (no data)
+
+        The matrix uses COO format for efficient construction. Convert to
+        CSR (tocsr()) for row slicing or CSC (tocsc()) for column slicing.
+
+    Raises:
+        FileNotFoundError: If the BAM file index (.bam.bai) is missing.
+            The BAM file must be indexed with `samtools index`.
+
+    Example:
+        >>> from bam2tensor.embedding import GenomeMethylationEmbedding
+        >>> from bam2tensor.functions import extract_methylation_data_from_bam
+        >>> import scipy.sparse
+        >>>
+        >>> # Create embedding (or load from cache)
+        >>> embedding = GenomeMethylationEmbedding(
+        ...     genome_name="hg38",
+        ...     expected_chromosomes=["chr1", "chr22"],
+        ...     fasta_source="GRCh38.fa",
+        ... )
+        >>>
+        >>> # Extract methylation data
+        >>> matrix = extract_methylation_data_from_bam(
+        ...     input_bam="sample.bam",
+        ...     genome_methylation_embedding=embedding,
+        ...     quality_limit=30,  # Stricter quality filter
+        ...     verbose=True,
+        ... )
+        >>>
+        >>> # Analyze results
+        >>> print(f"Reads with CpG data: {matrix.shape[0]:,}")
+        >>> print(f"Total CpG sites: {matrix.shape[1]:,}")
+        >>> print(f"Data points: {matrix.nnz:,}")
+        >>>
+        >>> # Save to file
+        >>> scipy.sparse.save_npz("sample.methylation.npz", matrix)
+
+    Note:
+        The function processes chromosomes in the order they appear in
+        genome_methylation_embedding.cpg_sites_dict. Reads are numbered
+        sequentially as they are encountered across all chromosomes.
+
+    See Also:
+        GenomeMethylationEmbedding: For creating the genome embedding.
+        scipy.sparse.coo_matrix: Documentation on the output format.
     """
     try:
         input_bam_object = pysam.AlignmentFile(  # type: ignore # pylint: disable=no-member

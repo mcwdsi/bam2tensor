@@ -64,6 +64,18 @@ tests/
 
 Pre-commit hooks enforce these automatically. Run `nox --session=pre-commit -- install` to set up.
 
+### Docstring Requirements (darglint)
+
+Darglint validates docstrings against actual code. Key rules:
+
+- **Only document explicitly raised exceptions**: In the `Raises:` section, only list exceptions that are raised with an explicit `raise` statement in that function. Do NOT document:
+  - Exceptions raised by called functions (even if they propagate up)
+  - Implicit exceptions (e.g., `KeyError` from dict access, `IndexError` from list access)
+- **Match Args to parameters**: Every parameter must be documented, and documented args must exist
+- **Match Returns to return type**: Return documentation must match actual return statements
+
+Run `nox --session=pre-commit` to validate docstrings before committing.
+
 ## Testing Guidelines
 
 - Test framework: pytest
