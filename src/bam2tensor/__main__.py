@@ -96,9 +96,6 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
     default=20,
     type=int,
 )
-@click.option(
-    "--window-size", help="Window size (default = 150)", default=150, type=int
-)
 @click.option("--verbose", help="Verbose output.", is_flag=True)
 @click.option("--skip-cache", help="De-novo generate CpG sites (slow).", is_flag=True)
 @click.option(
@@ -114,7 +111,6 @@ def main(
     expected_chromosomes: str,
     reference_fasta: str,
     quality_limit: int,
-    window_size: int,
     verbose: bool,
     skip_cache: bool,
     debug: bool,
@@ -134,7 +130,6 @@ def main(
         genome_name=genome_name,
         expected_chromosomes=expected_chromosomes.split(","),
         fasta_source=reference_fasta,
-        window_size=window_size,
         skip_cache=skip_cache,
         verbose=verbose,
     )

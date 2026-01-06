@@ -64,14 +64,6 @@ class GenomeMethylationEmbedding:
         # Store the CpG sites in a dict per chromosome
         self.cpg_sites_dict: dict[str, list[int]] = {}
 
-        # This is a dict of lists, where each list contains a tuple of CpG ranges within a window
-        # Key: chromosome, e.g. "chr1"
-        # Value: a list of tuples, e.g. [(0,35), (190,212), (1055,)]
-        self.windowed_cpg_sites_dict: dict[str, list[tuple]] = {}
-
-        # And a reverse dict of dicts where chrom->window_start->[cpgs]
-        self.windowed_cpg_sites_dict_reverse: dict[str, dict[int, list]] = {}
-
         self.cache_file = self.genome_name + ".cache.json.gz"
 
         # Check that the expected chromosomes are not empty
@@ -114,9 +106,6 @@ class GenomeMethylationEmbedding:
         self.total_cpg_sites = sum([len(v) for v in self.cpg_sites_dict.values()])
         if self.verbose:
             print(f"\tTotal CpG sites: {self.total_cpg_sites:,}")
-            print(
-                f"\tTotal number of windows (at window_size = {self.window_size}): {len(self.windowed_cpg_sites_dict):,}"
-            )
 
         # Create a dictionary of chromosome -> CpG site -> index (embedding) for efficient lookup
         self.chr_to_cpg_to_embedding_dict = {
@@ -155,7 +144,7 @@ class GenomeMethylationEmbedding:
         with gzip.open(self.cache_file, "wt", compresslevel=3, encoding="utf-8") as f:
             json.dump(cache_data, f)
         if self.verbose:
-            print("\tSaved embedding cache cache.")
+            print("\tSaved embedding cache.")
 
     def load_embedding_cache(self) -> bool:
         """Load our cached embedding data from a prior run.
@@ -181,26 +170,6 @@ class GenomeMethylationEmbedding:
             self.expected_chromosomes = self.cache_data["expected_chromosomes"]
             self.window_size = self.cache_data["window_size"]
             self.cpg_sites_dict = self.cache_data["cpg_sites_dict"]
-
-            # Backwards compatibility for old caches or if needed
-            self.windowed_cpg_sites_dict = self.cache_data.get(
-                "windowed_cpg_sites_dict", {}
-            )
-
-            # This is to convert the keys back to integers, since JSON only supports strings as keys
-            # Note that we want this on the second level keys '1234', not the first level keys 'chr1'
-            if "windowed_cpg_sites_dict_reverse" in self.cache_data:
-                self.windowed_cpg_sites_dict_reverse = {
-                    chrom: {
-                        int(cpg) if cpg.isdigit() else cpg: window
-                        for cpg, window in v.items()
-                    }
-                    for chrom, v in self.cache_data[
-                        "windowed_cpg_sites_dict_reverse"
-                    ].items()
-                }
-            else:
-                self.windowed_cpg_sites_dict_reverse = {}
 
             if self.verbose:
                 print(f"\tCached genome fasta source: {self.fasta_source}")
