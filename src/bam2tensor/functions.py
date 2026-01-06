@@ -24,6 +24,7 @@ Supported Aligners:
     - gem3/Blueprint: Uses the XB tag (C=forward, G=reverse)
 
 Example:
+    >>> # xdoctest: +SKIP
     >>> from bam2tensor.embedding import GenomeMethylationEmbedding
     >>> from bam2tensor.functions import extract_methylation_data_from_bam
     >>>
@@ -108,6 +109,7 @@ def extract_methylation_data_from_bam(
             The BAM file must be indexed with `samtools index`.
 
     Example:
+        >>> # xdoctest: +SKIP
         >>> from bam2tensor.embedding import GenomeMethylationEmbedding
         >>> from bam2tensor.functions import extract_methylation_data_from_bam
         >>> import scipy.sparse

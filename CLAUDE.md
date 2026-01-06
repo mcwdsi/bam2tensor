@@ -76,6 +76,24 @@ Darglint validates docstrings against actual code. Key rules:
 
 Run `nox --session=pre-commit` to validate docstrings before committing.
 
+### Doctest Requirements (xdoctest)
+
+xdoctest validates code examples in docstrings. Important rules:
+
+- **Run xdoctest before committing**: `nox --session=xdoctest` or `nox` (runs all sessions)
+- **Skip non-executable examples**: If an example references files that don't exist or can't be executed in isolation, add `# xdoctest: +SKIP` as the first line of the example block:
+
+  ```python
+  Example:
+      >>> # xdoctest: +SKIP
+      >>> embedding = GenomeMethylationEmbedding(
+      ...     genome_name="hg38",
+      ...     fasta_source="reference.fa",  # File doesn't exist in tests
+      ... )
+  ```
+
+- **Executable examples**: If an example can actually be executed (no external files needed), don't skip it - xdoctest will validate the output matches
+
 ## Testing Guidelines
 
 - Test framework: pytest

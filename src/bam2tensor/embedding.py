@@ -12,7 +12,9 @@ The CpG site index is cached to disk as a gzipped JSON file, allowing fast
 subsequent runs on the same reference genome.
 
 Example:
-    Create an embedding for the human genome::
+    Create an embedding for the human genome:
+
+    .. code-block:: python
 
         from bam2tensor.embedding import GenomeMethylationEmbedding
 
@@ -70,6 +72,7 @@ class GenomeMethylationEmbedding:
         cache_file: Path to the cache file for this genome.
 
     Example:
+        >>> # xdoctest: +SKIP
         >>> embedding = GenomeMethylationEmbedding(
         ...     genome_name="hg38",
         ...     expected_chromosomes=["chr1", "chr2"],
@@ -123,6 +126,7 @@ class GenomeMethylationEmbedding:
             ValueError: If expected_chromosomes is empty.
 
         Example:
+            >>> # xdoctest: +SKIP
             >>> # First run: parses FASTA and creates cache
             >>> embedding = GenomeMethylationEmbedding(
             ...     genome_name="hg38",
@@ -390,6 +394,7 @@ class GenomeMethylationEmbedding:
             AssertionError: If embedding is out of range.
 
         Example:
+            >>> # xdoctest: +SKIP
             >>> embedding = GenomeMethylationEmbedding(...)
             >>> chrom, pos = embedding.embedding_to_genomic_position(12345)
             >>> print(f"Column 12345 is {chrom}:{pos}")
@@ -434,6 +439,7 @@ class GenomeMethylationEmbedding:
             The matrix column index (0-based) corresponding to this CpG site.
 
         Example:
+            >>> # xdoctest: +SKIP
             >>> embedding = GenomeMethylationEmbedding(...)
             >>> col_idx = embedding.genomic_position_to_embedding("chr1", 10525)
             >>> print(f"chr1:10525 is at column {col_idx}")

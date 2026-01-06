@@ -53,6 +53,7 @@ def get_input_bams(input_path: str) -> list:
             nor a directory.
 
     Example:
+        >>> # xdoctest: +SKIP
         >>> get_input_bams("/path/to/sample.bam")
         ['/path/to/sample.bam']
 
