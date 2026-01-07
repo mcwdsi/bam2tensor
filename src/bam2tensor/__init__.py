@@ -49,4 +49,4 @@ See Also:
     - https://mcwdsi.github.io/bam2tensor for full documentation
 """
 
-__version__ = "1.4"
+__version__ = "1.5"
