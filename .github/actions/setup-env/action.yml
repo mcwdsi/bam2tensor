@@ -1,0 +1,41 @@
+name: Setup environment
+description: Set up Python, pip, Poetry, Nox, and uv
+
+inputs:
+  python-version:
+    description: Python version to install
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v6.2.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Upgrade pip
+      shell: bash
+      run: |
+        pip install -c ${{ github.workspace }}/.github/workflows/constraints.txt pip
+        pip --version
+
+    - name: Install Poetry
+      shell: bash
+      run: |
+        pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" poetry
+        pipx inject poetry poetry-plugin-export
+        poetry --version
+
+    - name: Install Nox
+      shell: bash
+      run: |
+        pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" nox
+        pipx inject --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" nox nox-poetry
+        nox --version
+
+    - name: Install uv
+      shell: bash
+      run: |
+        pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" uv
+        uv --version
