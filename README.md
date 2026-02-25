@@ -7,8 +7,7 @@
 
 [![Documentation](https://github.com/mcwdsi/bam2tensor/actions/workflows/docs.yml/badge.svg)][documentation]
 [![Tests](https://github.com/mcwdsi/bam2tensor/actions/workflows/tests.yml/badge.svg)][tests]
-[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=mcwdsi_bam2tensor&metric=coverage)][sonarcov]
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mcwdsi_bam2tensor&metric=alert_status)][sonarquality]
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/mcwdsi/bam2tensor/python-coverage-comment-action-data/endpoint.json)][coverage]
 
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)][pre-commit]
 [![Black](https://img.shields.io/badge/code%20style-black-000000.svg)][black]
@@ -18,8 +17,7 @@
 [pypi status]: https://pypi.org/project/bam2tensor/
 [documentation]: https://mcwdsi.github.io/bam2tensor
 [tests]: https://github.com/mcwdsi/bam2tensor/actions?workflow=Tests
-[sonarcov]: https://sonarcloud.io/summary/overall?id=mcwdsi_bam2tensor
-[sonarquality]: https://sonarcloud.io/summary/overall?id=mcwdsi_bam2tensor
+[coverage]: https://htmlpreview.github.io/?https://github.com/mcwdsi/bam2tensor/blob/python-coverage-comment-action-data/htmlcov/index.html
 [pre-commit]: https://github.com/pre-commit/pre-commit
 [black]: https://github.com/psf/black
 [poetry]: https://python-poetry.org/
