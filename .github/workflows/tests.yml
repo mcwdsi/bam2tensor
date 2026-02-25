@@ -46,15 +46,6 @@ jobs:
           pip install -c ${{ github.workspace }}/.github/workflows/constraints.txt pip
           pip --version
 
-      - name: Upgrade pip in virtual environments
-        shell: python
-        run: |
-          import os
-          import pip
-
-          with open(os.environ["GITHUB_ENV"], mode="a") as io:
-              print(f"VIRTUALENV_PIP={pip.__version__}", file=io)
-
       - name: Install Poetry
         run: |
           pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" poetry
@@ -69,7 +60,7 @@ jobs:
 
       - name: Install uv
         run: |
-          pipx install uv
+          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" uv
           uv --version
 
       - name: Compute pre-commit cache key
@@ -132,7 +123,7 @@ jobs:
 
       - name: Upgrade pip
         run: |
-          pip install -c .github/workflows/constraints.txt pip
+          pip install -c ${{ github.workspace }}/.github/workflows/constraints.txt pip
           pip --version
 
       - name: Install Poetry
@@ -149,7 +140,7 @@ jobs:
 
       - name: Install uv
         run: |
-          pipx install uv
+          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" uv
           uv --version
 
       - name: Download coverage data
