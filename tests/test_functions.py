@@ -2,7 +2,6 @@ import pytest
 from bam2tensor import embedding
 from bam2tensor import functions
 
-
 TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
     "test_genome",
     expected_chromosomes=["chr1", "chr2", "chr3"],
