@@ -36,32 +36,10 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v6
 
-      - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v6.2.0
+      - name: Set up environment
+        uses: ./.github/actions/setup-env
         with:
           python-version: ${{ matrix.python }}
-
-      - name: Upgrade pip
-        run: |
-          pip install -c ${{ github.workspace }}/.github/workflows/constraints.txt pip
-          pip --version
-
-      - name: Install Poetry
-        run: |
-          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" poetry
-          pipx inject poetry poetry-plugin-export
-          poetry --version
-
-      - name: Install Nox
-        run: |
-          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" nox
-          pipx inject --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" nox nox-poetry
-          nox --version
-
-      - name: Install uv
-        run: |
-          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" uv
-          uv --version
 
       - name: Compute pre-commit cache key
         if: matrix.session == 'pre-commit'
@@ -116,32 +94,10 @@ jobs:
         with:
           fetch-depth: 0 # Shallow clones should be disabled for a better relevancy of analysis
 
-      - name: Set up Python
-        uses: actions/setup-python@v6.2.0
+      - name: Set up environment
+        uses: ./.github/actions/setup-env
         with:
           python-version: "3.12"
-
-      - name: Upgrade pip
-        run: |
-          pip install -c ${{ github.workspace }}/.github/workflows/constraints.txt pip
-          pip --version
-
-      - name: Install Poetry
-        run: |
-          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" poetry
-          pipx inject poetry poetry-plugin-export
-          poetry --version
-
-      - name: Install Nox
-        run: |
-          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" nox
-          pipx inject --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" nox nox-poetry
-          nox --version
-
-      - name: Install uv
-        run: |
-          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" uv
-          uv --version
 
       - name: Download coverage data
         uses: actions/download-artifact@v7
