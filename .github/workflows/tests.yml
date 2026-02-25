@@ -88,6 +88,9 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     needs: tests
+    permissions:
+      pull-requests: write
+      contents: write
     steps:
       - name: Check out the repository
         uses: actions/checkout@v6
@@ -108,19 +111,25 @@ jobs:
       - name: Combine coverage data and create reports
         run: |
           nox --session=coverage
-          nox -R --session=coverage -- xml
+          # nox -R --session=coverage -- xml  # XML report only needed for SonarCloud
 
-      # Need to fix coverage source paths for SonarCloud scanning in GitHub actions.
-      # Replace root path with /github/workspace (mounted in docker container).
-      - name: Override coverage source paths for SonarCloud
-        run: |
-          sed -i "s/<source><\/source>/<source>\/github\/workspace<\/source>/g" coverage.xml
-          sed -i "s/<source>tests/<source>\/github\/workspace\/tests/g" coverage.xml
+      - name: Coverage comment
+        id: coverage_comment
+        uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
 
-      - name: SonarCloud Scan
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Needed to get PR information, if any
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        # No need to run SonarCloud analysis if dependabot update or token not defined
-        if: env.SONAR_TOKEN != '' && (github.actor != 'dependabot[bot]')
-        uses: SonarSource/sonarqube-scan-action@v7.0.0
+      # # Need to fix coverage source paths for SonarCloud scanning in GitHub actions.
+      # # Replace root path with /github/workspace (mounted in docker container).
+      # - name: Override coverage source paths for SonarCloud
+      #   run: |
+      #     sed -i "s/<source><\/source>/<source>\/github\/workspace<\/source>/g" coverage.xml
+      #     sed -i "s/<source>tests/<source>\/github\/workspace\/tests/g" coverage.xml
+      #
+      # - name: SonarCloud Scan
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Needed to get PR information, if any
+      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      #   # No need to run SonarCloud analysis if dependabot update or token not defined
+      #   if: env.SONAR_TOKEN != '' && (github.actor != 'dependabot[bot]')
+      #   uses: SonarSource/sonarqube-scan-action@v7.0.0
