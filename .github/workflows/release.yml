@@ -22,21 +22,15 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.10.6"
+
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
         with:
           python-version: "3.12"
-
-      - name: Upgrade pip
-        run: |
-          pip install -c ${{ github.workspace }}/.github/workflows/constraints.txt pip
-          pip --version
-
-      - name: Install Poetry
-        run: |
-          pipx install --pip-args "-c ${{ github.workspace }}/.github/workflows/constraints.txt" poetry
-          pipx inject poetry poetry-plugin-export
-          poetry --version
 
       - name: Check if there is a parent commit
         id: check-parent-commit
@@ -56,18 +50,20 @@ jobs:
         uses: salsify/action-detect-and-tag-new-version@v2.0.3
         with:
           version-command: |
-            bash -o pipefail -c "poetry version | cut -f 2 -d' '"
+            bash -o pipefail -c "python -c \"import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])\""
 
       - name: Bump version for developmental release
         if: (!steps.check-version.outputs.tag && !steps.check-tag.outputs.tag)
         run: |
-          poetry version patch &&
-          version=$(poetry version | awk '{ print $2 }') &&
-          poetry version $version.dev.$(date +%s)
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          IFS='.' read -r major minor patch <<< "$version"
+          new_patch=$((${patch:-0} + 1))
+          dev_version="$major.$minor.$new_patch.dev$(date +%s)"
+          sed -i "s/^version = \".*\"/version = \"$dev_version\"/" pyproject.toml
 
       - name: Build package
         run: |
-          poetry build --ansi
+          uv build
 
       - name: Publish package on PyPI
         if: steps.check-version.outputs.tag || steps.check-tag.outputs.tag

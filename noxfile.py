@@ -12,17 +12,8 @@ import nox
 # Use uv for faster virtual environment creation
 nox.options.default_venv_backend = "uv"
 
-try:
-    from nox_poetry import Session
-    from nox_poetry import session
-except ImportError:
-    message = f"""\
-    Nox failed to import the 'nox-poetry' package.
-
-    Please install it using the following command:
-
-    {sys.executable} -m pip install nox-poetry"""
-    raise SystemExit(dedent(message)) from None
+session = nox.session
+Session = nox.Session
 
 package = "bam2tensor"
 python_versions = ["3.12", "3.11", "3.13"]

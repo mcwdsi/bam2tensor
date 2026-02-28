@@ -12,7 +12,6 @@
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)][pre-commit]
 [![Black](https://img.shields.io/badge/code%20style-black-000000.svg)][black]
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![Poetry](https://img.shields.io/endpoint?url=https://python-poetry.org/badge/v0.json)][poetry]
 
 [pypi status]: https://pypi.org/project/bam2tensor/
 [documentation]: https://mcwdsi.github.io/bam2tensor
@@ -20,7 +19,6 @@
 [coverage]: https://htmlpreview.github.io/?https://github.com/mcwdsi/bam2tensor/blob/python-coverage-comment-action-data/htmlcov/index.html
 [pre-commit]: https://github.com/pre-commit/pre-commit
 [black]: https://github.com/psf/black
-[poetry]: https://python-poetry.org/
 
 **bam2tensor** is a Python package for converting bisulfite-sequencing `.bam` files to sparse tensor representations of DNA methylation data. It extracts read-level methylation states from CpG sites and outputs efficient sparse COO matrices as `.npz` files, ready for deep learning pipelines.
 
@@ -97,8 +95,7 @@ pip install .
 ```bash
 git clone https://github.com/mcwdsi/bam2tensor.git
 cd bam2tensor
-pip install poetry
-poetry install
+uv sync
 ```
 
 ## Quick Start
@@ -426,7 +423,7 @@ Contributions are welcome! Please see the [Contributor Guide] for guidelines on:
 
 ```bash
 # Install development dependencies
-poetry install
+uv sync
 
 # Run all checks (linting, type checking, tests)
 nox
@@ -437,8 +434,8 @@ nox --session=mypy        # Type checking
 nox --session=pre-commit  # Linting
 
 # Format code
-poetry run black src tests
-poetry run ruff check --fix src tests
+uv run black src tests
+uv run ruff check --fix src tests
 ```
 
 ## License

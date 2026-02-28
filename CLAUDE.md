@@ -10,7 +10,7 @@ bam2tensor is a Python package that converts BAM files to sparse tensor represen
 
 ```bash
 # Install dependencies
-poetry install
+uv sync
 
 # Run all checks (pre-commit, mypy, tests, typeguard, xdoctest, docs-build)
 nox
@@ -21,19 +21,19 @@ nox --session=mypy
 nox --session=pre-commit
 
 # Run tests directly
-poetry run pytest
+uv run pytest
 
 # Run tests with coverage
-poetry run pytest --cov
+uv run pytest --cov
 
 # Format code
-poetry run black src tests
+uv run black src tests
 
 # Lint code
-poetry run ruff check src tests
+uv run ruff check src tests
 
 # Type check
-poetry run mypy src
+uv run mypy src
 ```
 
 ## Project Structure
@@ -137,5 +137,5 @@ xdoctest validates code examples in docstrings. Important rules:
 
 **Running the tool**:
 ```bash
-poetry run bam2tensor --input-path input.bam --reference-fasta ref.fa
+uv run bam2tensor --input-path input.bam --reference-fasta ref.fa
 ```

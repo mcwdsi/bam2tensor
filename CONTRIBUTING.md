@@ -34,31 +34,22 @@ Request features on the [Issue Tracker].
 
 You need Python 3.10+ and the following tools:
 
-- [Poetry]
+- [uv]
 - [Nox]
-- [nox-poetry]
 
-Install [pipx]:
-
-```console
-python -m pip install --user pipx
-python -m pipx ensurepath
-```
-
-Install [Poetry]:
+Install [uv]:
 
 ```console
-pipx install poetry
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Install [Nox] and [nox-poetry]:
+Install [Nox]:
 
 ```console
-pipx install nox
-pipx inject nox nox-poetry
+uv tool install nox --with uv
 ```
 
-Install the pre-commit hooks
+Install the pre-commit hooks:
 
 ```console
 nox --session=pre-commit -- install
@@ -67,14 +58,14 @@ nox --session=pre-commit -- install
 Install the package with development requirements:
 
 ```console
-poetry install
+uv sync
 ```
 
 You can now run an interactive Python session, or your app:
 
 ```console
-poetry run python
-poetry run bam2tensor
+uv run python
+uv run bam2tensor
 ```
 
 ## How to test the project
@@ -126,10 +117,8 @@ This will allow a chance to talk it over with the owners and validate your appro
 [source code]: https://github.com/mcwdsi/bam2tensor
 [documentation]: https://mcwdsi.github.io/bam2tensor
 [issue tracker]: https://github.com/mcwdsi/bam2tensor/issues
-[pipx]: https://pipx.pypa.io/
-[poetry]: https://python-poetry.org/
+[uv]: https://docs.astral.sh/uv/
 [nox]: https://nox.thea.codes/
-[nox-poetry]: https://nox-poetry.readthedocs.io/
 [pytest]: https://pytest.readthedocs.io/
 [pull request]: https://github.com/mcwdsi/bam2tensor/pulls
 

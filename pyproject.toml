@@ -1,51 +1,53 @@
-[tool.poetry]
+[project]
 name = "bam2tensor"
 version = "1.5"
 description = "Bam2Tensor"
-authors = ["Nick Semenkovich <semenko@alum.mit.edu>"]
+authors = [{ name = "Nick Semenkovich", email = "semenko@alum.mit.edu" }]
 license = "MIT"
 readme = "README.md"
-homepage = "https://github.com/mcwdsi/bam2tensor"
-repository = "https://github.com/mcwdsi/bam2tensor"
-documentation = "https://mcwdsi.github.io/bam2tensor"
+requires-python = ">=3.10"
 classifiers = ["Development Status :: 4 - Beta"]
+dependencies = [
+    "click>=8.0.1",
+    "numpy>=1.26.0",
+    "scipy>=1.11.4",
+    "tqdm>=4.66.1",
+    "biopython>=1.81",
+    "pysam>=0.22.0",
+]
 
-[tool.poetry.urls]
+[project.urls]
+Homepage = "https://github.com/mcwdsi/bam2tensor"
+Repository = "https://github.com/mcwdsi/bam2tensor"
+Documentation = "https://mcwdsi.github.io/bam2tensor"
 Changelog = "https://github.com/mcwdsi/bam2tensor/releases"
 
-[tool.poetry.dependencies]
-python = ">=3.10,<4.0"
-click = ">=8.0.1"
-numpy = ">=1.26.0"
-scipy = ">=1.11.4"
-tqdm = ">=4.66.1"
-biopython = ">=1.81"
-pysam = ">=0.22.0"
+[project.scripts]
+bam2tensor = "bam2tensor.__main__:main"
 
-[tool.poetry.group.dev.dependencies]
-pygments = ">=2.18.0"
-black = { extras = ["jupyter"], version = ">=24.0.0" }
-coverage = { extras = ["toml"], version = ">=7.0" }
-darglint = ">=1.8.1"
-furo = ">=2024.1.29"
-mypy = ">=1.10.0"
-pre-commit = ">=3.7.0"
-pre-commit-hooks = ">=4.6.0"
-ruff = ">=0.4.0"
-pytest = ">=8.0.0"
-sphinx = ">=7.3.0"
-sphinx-autobuild = ">=2024.4.16"
-sphinx-autodoc-typehints = ">=2.1.0"
-sphinx-click = ">=6.0.0"
-typeguard = ">=4.3.0"
-xdoctest = { extras = ["colors"], version = ">=1.1.0" }
-myst-parser = { version = ">=3.0.0" }
+[dependency-groups]
+dev = [
+    "pygments>=2.18.0",
+    "black[jupyter]>=24.0.0",
+    "coverage[toml]>=7.0",
+    "darglint>=1.8.1",
+    "furo>=2024.1.29",
+    "mypy>=1.10.0",
+    "pre-commit>=3.7.0",
+    "pre-commit-hooks>=4.6.0",
+    "ruff>=0.4.0",
+    "pytest>=8.0.0",
+    "sphinx>=7.3.0",
+    "sphinx-autobuild>=2024.4.16",
+    "sphinx-autodoc-typehints>=2.1.0",
+    "sphinx-click>=6.0.0",
+    "typeguard>=4.3.0",
+    "xdoctest[colors]>=1.1.0",
+    "myst-parser>=3.0.0",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-
-[tool.poetry.scripts]
-bam2tensor = "bam2tensor.__main__:main"
 
 [tool.coverage.paths]
 source = ["src", "*/site-packages"]
@@ -127,5 +129,5 @@ classmethod-decorators = ["classmethod", "validator", "root_validator", "pydanti
 ]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
