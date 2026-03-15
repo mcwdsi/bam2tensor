@@ -5,17 +5,17 @@
 | Name                           |    Stmts |     Miss |   Branch |   BrPart |   Cover |   Missing |
 |------------------------------- | -------: | -------: | -------: | -------: | ------: | --------: |
 | src/bam2tensor/\_\_init\_\_.py |        1 |        0 |        0 |        0 |    100% |           |
-| src/bam2tensor/\_\_main\_\_.py |      121 |       12 |       54 |        6 |     87% |154, 159, 303-309, 319, 323, 424 |
+| src/bam2tensor/\_\_main\_\_.py |      128 |       15 |       56 |        7 |     86% |68-70, 182, 187, 331-337, 347, 351, 452 |
 | src/bam2tensor/embedding.py    |       98 |        0 |       42 |        0 |    100% |           |
-| src/bam2tensor/functions.py    |      120 |       20 |       64 |        6 |     78% |261-265, 277, 329-339, 359, 384-386, 388-391 |
+| src/bam2tensor/functions.py    |      115 |       11 |       58 |        5 |     87% |265-269, 289->303, 298->303, 362, 387-389, 391-394 |
 | src/bam2tensor/reference.py    |       63 |       29 |       16 |        2 |     53% |77-79, 177->179, 181-225 |
 | tests/\_\_init\_\_.py          |        0 |        0 |        0 |        0 |    100% |           |
 | tests/test\_duplication.py     |       27 |        0 |        0 |        0 |    100% |           |
 | tests/test\_embedding.py       |       69 |        0 |        4 |        0 |    100% |           |
-| tests/test\_functions.py       |       55 |        0 |        0 |        0 |    100% |           |
+| tests/test\_functions.py       |      139 |        0 |        6 |        1 |     99% |  138->154 |
 | tests/test\_main.py            |       92 |        0 |        0 |        0 |    100% |           |
 | tests/test\_reference.py       |       67 |        0 |        4 |        0 |    100% |           |
-| **TOTAL**                      |  **713** |   **61** |  **184** |   **14** | **89%** |           |
+| **TOTAL**                      |  **799** |   **55** |  **186** |   **15** | **91%** |           |
 
 
 ## Setup coverage badge
