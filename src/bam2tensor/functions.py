@@ -60,6 +60,48 @@ from bam2tensor.embedding import GenomeMethylationEmbedding
 _SKIP_FLAGS = 0x400 | 0x200 | 0x100 | 0x800
 
 
+def detect_aligner(input_bam: str, sample_size: int = 1000) -> str:
+    """Detect the aligner used to produce a BAM file by checking read tags.
+
+    Samples up to ``sample_size`` reads from the BAM file and checks for
+    aligner-specific tags: ``XM`` (Bismark), ``YD`` (Biscuit/bwameth),
+    or ``XB`` (gem3/Blueprint).
+
+    Args:
+        input_bam: Path to an indexed BAM file.
+        sample_size: Maximum number of reads to examine. Only primary,
+            non-duplicate, non-QC-failed reads are considered.
+
+    Returns:
+        A human-readable string identifying the detected aligner, such as
+        ``"Bismark (XM tag)"`` or ``"Unknown"``.
+    """
+    try:
+        bam = pysam.AlignmentFile(input_bam, "rb", require_index=True)  # type: ignore
+    except (FileNotFoundError, ValueError):
+        return "Unknown (could not open BAM)"
+
+    checked = 0
+    for read in bam.fetch():
+        if read.flag & _SKIP_FLAGS:
+            continue
+        if read.has_tag("XM"):
+            bam.close()
+            return "Bismark (XM tag)"
+        if read.has_tag("YD"):
+            bam.close()
+            return "Biscuit/bwameth (YD tag)"
+        if read.has_tag("XB"):
+            bam.close()
+            return "gem3/Blueprint (XB tag)"
+        checked += 1
+        if checked >= sample_size:
+            break
+
+    bam.close()
+    return "Unknown (no XM/YD/XB tags found)"
+
+
 def check_chromosome_overlap(
     bam_references: tuple[str, ...] | list[str],
     embedding_chromosomes: list[str],

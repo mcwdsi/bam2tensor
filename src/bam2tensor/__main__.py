@@ -33,7 +33,9 @@ import scipy.sparse
 
 from bam2tensor.embedding import GenomeMethylationEmbedding
 
+from bam2tensor import __version__
 from bam2tensor.functions import (
+    detect_aligner,
     extract_methylation_data_from_bam,
 )
 from bam2tensor.reference import (
@@ -179,9 +181,7 @@ def validate_input_output(
         output_file = get_output_path(bam_file, output_dir)
         if os.path.exists(output_file):
             if overwrite and os.access(output_file, os.W_OK):
-                print(
-                    "\t\tOutput file exists and --overwrite specified. Will overwrite existing .methylation.npz file."
-                )
+                pass  # Silently allow; the per-BAM output will show the overwrite
         else:
             if not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
                 raise ValueError(f"Output file path is not writable: {output_file}")
@@ -357,35 +357,53 @@ def main(
         os.makedirs(output_dir, exist_ok=True)
 
     time_start = time.time()
-    # Print run information
-    print(f"Genome name: {genome_name}")
-    print(f"Reference fasta: {reference_fasta}")
-    print(f"Expected chromosomes: {expected_chromosomes}")
-    print(f"Input path: {input_path}")
-    if output_dir:
-        print(f"Output directory: {output_dir}")
-    print(f"\nLoading (or generating) methylation embedding for: {genome_name}")
 
-    # Create (or load) a GenomeMethylationEmbedding object
+    # ── Header ──────────────────────────────────────────────────────────
+    print(f"bam2tensor v{__version__}")
+    print("=" * 72)
+
+    # ── Configuration ───────────────────────────────────────────────────
+    chrom_list = expected_chromosomes.split(",")
+    if len(chrom_list) <= 4:
+        chrom_display = expected_chromosomes
+    else:
+        chrom_display = (
+            f"{len(chrom_list)} ({chrom_list[0]}, {chrom_list[1]}, "
+            f"... {chrom_list[-2]}, {chrom_list[-1]})"
+        )
+
+    print(f"  Genome:        {genome_name}")
+    print(f"  Reference:     {reference_fasta}")
+    print(f"  Chromosomes:   {chrom_display}")
+    print(f"  Quality limit: MAPQ >= {quality_limit}")
+    if output_dir:
+        print(f"  Output dir:    {output_dir}")
+    else:
+        print("  Output:        next to input BAMs")
+    print()
+
+    # ── Load CpG index ──────────────────────────────────────────────────
+    print(f"Loading CpG site index for {genome_name}...")
     genome_methylation_embedding = GenomeMethylationEmbedding(
         genome_name=genome_name,
-        expected_chromosomes=expected_chromosomes.split(","),
+        expected_chromosomes=chrom_list,
         fasta_source=reference_fasta,
         skip_cache=skip_cache,
         verbose=verbose,
     )
+    n_chroms = len(genome_methylation_embedding.cpg_sites_dict)
+    print(
+        f"  Total CpG sites: {genome_methylation_embedding.total_cpg_sites:,}"
+        f" across {n_chroms} chromosome(s)"
+    )
+    print(f"  Index loaded in {_format_elapsed(time.time() - time_start)}")
 
-    print(f"\nTime elapsed: {_format_elapsed(time.time() - time_start)}")
-
-    #################################################
-    # Establish input/output for .bam files
-    #################################################
-
+    # ── Discover BAM files ──────────────────────────────────────────────
     bams_to_process = get_input_bams(input_path)
-
-    print(f"\nFound {len(bams_to_process)} .bam file(s) to process:")
-    for bam_file in bams_to_process:
-        print(f"\t{bam_file}")
+    n_bams = len(bams_to_process)
+    print(f"\nFound {n_bams} BAM file(s):")
+    for idx, bam_file in enumerate(bams_to_process, 1):
+        print(f"  {idx}. {bam_file}")
 
     validate_input_output(
         bams_to_process=bams_to_process,
@@ -393,27 +411,30 @@ def main(
         output_dir=output_dir,
     )
 
-    #################################################
-    # Operate over the input BAM files
-    #################################################
-
-    errors_list = []
+    # ── Process each BAM ────────────────────────────────────────────────
+    errors_list: list[Exception] = []
     skip_count = 0
     for i, input_bam in enumerate(bams_to_process):
         time_bam = time.time()
         output_file = get_output_path(input_bam, output_dir)
-        # Extract methylation data as a COO sparse matrix
-        print("\n" + "=" * 80)
-        print(f"Processing BAM file {i+1} of {len(bams_to_process)}")
-        print(f"\nExtracting methylation data from: {input_bam}")
+        bam_basename = os.path.basename(input_bam)
+
+        print()
+        print("=" * 72)
+        print(f"[{i + 1}/{n_bams}] {bam_basename}")
+        print("-" * 72)
 
         if os.path.exists(output_file) and not overwrite:
-            print(
-                "\tOutput file already exists and --overwrite not specified. Skipping this .bam."
-            )
+            print("  Skipped: output already exists (use --overwrite to replace)")
             skip_count += 1
             continue
 
+        # Detect aligner
+        aligner = detect_aligner(input_bam)
+        print(f"  Aligner:       {aligner}")
+
+        # Extract
+        print("  Extracting methylation data...")
         try:
             methylation_data_coo = extract_methylation_data_from_bam(
                 input_bam=input_bam,
@@ -422,30 +443,40 @@ def main(
                 verbose=verbose,
                 debug=debug,
             )
-        except FileNotFoundError as e:  # Likely no .bam index file
-            print(f"Error: {e}")
+        except FileNotFoundError as e:
+            print(f"  ERROR: {e}")
             errors_list.append(e)
             continue
 
-        print(f"\nWriting methylation data to: {output_file}")
+        # Matrix stats
+        n_reads = methylation_data_coo.shape[0]
+        n_cpgs = methylation_data_coo.shape[1]
+        n_data = methylation_data_coo.nnz
+        print(
+            f"  Result:        {n_reads:,} reads x {n_cpgs:,} CpG sites"
+            f" ({n_data:,} data points)"
+        )
 
-        # Save the matrix, which is an ndarray of shape (n_reads, n_cpgs), to a file
+        # Save
         scipy.sparse.save_npz(output_file, methylation_data_coo, compressed=True)
+        print(f"  Output:        {output_file}")
+        print(f"  Time:          {_format_elapsed(time.time() - time_bam)}")
 
-        # Report performance time
-        print(f"\nTime for this bam: {_format_elapsed(time.time() - time_bam)}")
-        print(f"\nTotal time elapsed: {_format_elapsed(time.time() - time_start)}")
-
+    # ── Summary ─────────────────────────────────────────────────────────
+    print()
+    print("=" * 72)
+    print("Summary")
+    print("-" * 72)
+    processed = n_bams - skip_count - len(errors_list)
+    print(f"  Processed:     {processed} BAM(s)")
+    if skip_count:
+        print(f"  Skipped:       {skip_count} (existing output)")
     if errors_list:
-        print(f"\n{len(errors_list)} errors occurred during processing:")
+        print(f"  Errors:        {len(errors_list)}")
         for error in errors_list:
-            print(f"\t{error}")
-
-    print("\nRun complete.")
-    print(f"\n{len(bams_to_process) - skip_count} .bam files were processed.")
-    print(f"\t{skip_count} .bam files were skipped due to existing output files.")
-    print(f"\t{len(errors_list)} .bam files had errors (missing index files?).")
-    print(f"\nTotal time elapsed: {_format_elapsed(time.time() - time_start)}")
+            print(f"                 - {error}")
+    print(f"  Total time:    {_format_elapsed(time.time() - time_start)}")
+    print("=" * 72)
 
 
 if __name__ == "__main__":

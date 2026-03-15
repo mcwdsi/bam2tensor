@@ -3,6 +3,7 @@ import pytest
 from bam2tensor import embedding
 from bam2tensor import functions
 from bam2tensor.functions import check_chromosome_overlap
+from bam2tensor.functions import detect_aligner
 
 TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
     "test_genome",
@@ -772,6 +773,55 @@ def test_bismark_read_no_cpg_overlap(tmp_path):
         input_bam=bam_path, genome_methylation_embedding=emb
     )
     assert matrix.shape[0] == 0
+
+
+def test_detect_aligner_yd_tag():
+    """detect_aligner identifies Biscuit/bwameth from the test BAM (has YD tag)."""
+    result = detect_aligner("tests/test.bam")
+    assert "Biscuit" in result or "bwameth" in result
+    assert "YD" in result
+
+
+def test_detect_aligner_xm_tag(tmp_path):
+    """detect_aligner identifies Bismark from a BAM with XM tags."""
+    bam_path = tmp_path / "bismark.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 100, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "A" * 100
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, 100)]
+        a.set_tag("XM", "." * 100)
+        out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    result = detect_aligner(str(bam_path))
+    assert "Bismark" in result
+    assert "XM" in result
+
+
+def test_detect_aligner_no_tags(tmp_path):
+    """detect_aligner returns Unknown for BAMs without methylation tags."""
+    bam_path = tmp_path / "plain.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 100, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "A" * 100
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, 100)]
+        out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    result = detect_aligner(str(bam_path))
+    assert "Unknown" in result
 
 
 def test_extract_methylation_missing_index(tmp_path) -> None:

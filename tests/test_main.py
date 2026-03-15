@@ -114,7 +114,7 @@ def test_main_skip_existing(runner: CliRunner, tmp_path) -> None:
     )
 
     assert result.exit_code == 0
-    assert "Skipping this .bam" in result.output or "skipped" in result.output.lower()
+    assert "Skipped" in result.output or "skipped" in result.output.lower()
 
 
 def test_main_missing_bam_index(runner: CliRunner, tmp_path) -> None:
@@ -140,8 +140,8 @@ def test_main_missing_bam_index(runner: CliRunner, tmp_path) -> None:
 
     # The main function catches FileNotFoundError and reports it
     assert result.exit_code == 0  # Should complete (with errors logged)
-    assert "Error" in result.output or "error" in result.output.lower()
-    assert "1 errors occurred" in result.output or "had errors" in result.output
+    assert "ERROR" in result.output or "error" in result.output.lower()
+    assert "Errors" in result.output or "errors" in result.output.lower()
 
 
 def test_get_output_path_default() -> None:
