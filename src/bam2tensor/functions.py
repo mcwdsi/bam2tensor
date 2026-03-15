@@ -2,8 +2,9 @@
 
 This module contains the main function for extracting methylation data from
 BAM files: extract_methylation_data_from_bam(). This function reads aligned
-bisulfite-sequencing reads and generates a sparse matrix representation of
-methylation states at each CpG site.
+bisulfite-sequencing (BS-seq) and enzymatic methylation sequencing (EM-seq)
+reads and generates a sparse matrix representation of methylation states at
+each CpG site.
 
 The extraction process:
     1. Iterates through each chromosome in the genome embedding
@@ -21,6 +22,7 @@ Methylation State Encoding:
 Supported Aligners:
     The module supports BAM files from aligners that provide strand information:
     - Biscuit: Uses the YD tag (f=forward, r=reverse)
+    - bwameth: Uses the YD tag (f=forward, r=reverse), identical to Biscuit
     - gem3/Blueprint: Uses the XB tag (C=forward, G=reverse)
 
 Example:
@@ -53,6 +55,78 @@ from tqdm import tqdm
 from bam2tensor.embedding import GenomeMethylationEmbedding
 
 
+def check_chromosome_overlap(
+    bam_references: tuple[str, ...] | list[str],
+    embedding_chromosomes: list[str],
+) -> None:
+    """Check that BAM and embedding chromosome names overlap.
+
+    Detects the common mistake where a BAM file uses one chromosome naming
+    convention (e.g., ``1``, ``2``, ``3`` from Ensembl) while the reference
+    embedding uses another (e.g., ``chr1``, ``chr2``, ``chr3`` from UCSC).
+    If no overlap is found but adding or stripping a ``chr`` prefix would
+    create overlap, raises a clear error with guidance.
+
+    Args:
+        bam_references: Tuple or list of chromosome/contig names from the
+            BAM file header (e.g., from ``pysam.AlignmentFile.references``).
+        embedding_chromosomes: List of chromosome names from the genome
+            embedding (i.e., the expected chromosomes).
+
+    Raises:
+        ValueError: If there is no overlap between BAM and embedding
+            chromosome names, with a diagnostic message indicating
+            whether a ``chr`` prefix mismatch is the likely cause.
+    """
+    bam_set = set(bam_references)
+    emb_set = set(embedding_chromosomes)
+
+    overlap = bam_set & emb_set
+    if overlap:
+        return
+
+    # Try adding "chr" prefix to BAM references
+    bam_with_chr = {f"chr{name}" for name in bam_set}
+    if bam_with_chr & emb_set:
+        bam_example = next(iter(bam_set - emb_set))
+        emb_example = f"chr{bam_example}"
+        raise ValueError(
+            f"Chromosome name mismatch: BAM file uses '{bam_example}' "
+            f"but the reference embedding expects '{emb_example}'. "
+            f"Your BAM file appears to use Ensembl-style names (no 'chr' prefix) "
+            f"while the embedding uses UCSC-style names ('chr' prefix). "
+            f"Use --expected-chromosomes with matching names "
+            f"(e.g., --expected-chromosomes '1,2,3,...')."
+        )
+
+    # Try stripping "chr" prefix from BAM references
+    bam_stripped = {name[3:] for name in bam_set if name.startswith("chr")}
+    if bam_stripped & emb_set:
+        bam_example = next(
+            name for name in bam_set if name.startswith("chr") and name[3:] in emb_set
+        )
+        emb_example = bam_example[3:]
+        raise ValueError(
+            f"Chromosome name mismatch: BAM file uses '{bam_example}' "
+            f"but the reference embedding expects '{emb_example}'. "
+            f"Your BAM file uses UCSC-style names ('chr' prefix) "
+            f"while the embedding uses Ensembl-style names (no 'chr' prefix). "
+            f"Use --expected-chromosomes with matching names "
+            f"(e.g., --expected-chromosomes 'chr1,chr2,chr3,...')."
+        )
+
+    # No overlap even with prefix changes -- completely different names
+    bam_sample = sorted(bam_set)[:3]
+    emb_sample = sorted(emb_set)[:3]
+    raise ValueError(
+        f"No overlapping chromosome names between BAM file and reference "
+        f"embedding. BAM contains: {bam_sample}... "
+        f"Embedding expects: {emb_sample}... "
+        f"Ensure the reference FASTA matches the genome used for alignment "
+        f"and that --expected-chromosomes is set correctly."
+    )
+
+
 def extract_methylation_data_from_bam(
     input_bam: str,
     genome_methylation_embedding: GenomeMethylationEmbedding,
@@ -62,9 +136,10 @@ def extract_methylation_data_from_bam(
 ) -> scipy.sparse.coo_matrix:
     """Extract read-level CpG methylation data from a BAM file.
 
-    Parses a bisulfite-sequencing BAM file and extracts methylation states
-    at each CpG site covered by aligned reads. Returns a sparse matrix where
-    each row represents a unique read and each column represents a CpG site.
+    Parses a bisulfite-sequencing or EM-seq BAM file and extracts methylation
+    states at each CpG site covered by aligned reads. Returns a sparse matrix
+    where each row represents a unique read and each column represents a CpG
+    site.
 
     The function applies several filters to reads:
         - Mapping quality must be >= quality_limit (default 20)
@@ -153,6 +228,12 @@ def extract_methylation_data_from_bam(
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"Index missing for bam file?: {input_bam}") from exc
 
+    # Check for chromosome name mismatches (e.g. chr1 vs 1)
+    check_chromosome_overlap(
+        bam_references=input_bam_object.references,
+        embedding_chromosomes=list(genome_methylation_embedding.cpg_sites_dict.keys()),
+    )
+
     if verbose:
         print(f"\tTotal reads: {input_bam_object.mapped:,}\n")
     if debug:
@@ -240,7 +321,7 @@ def extract_methylation_data_from_bam(
 
             ## Read tags and ensure we're on the correct bisulfite-converted strand
             bisulfite_parent_strand_is_reverse = None
-            if aligned_segment.has_tag("YD"):  # Biscuit tag
+            if aligned_segment.has_tag("YD"):  # Biscuit / bwameth tag
                 yd_tag = aligned_segment.get_tag("YD")
                 if yd_tag == "f":  # Forward = C→T
                     # This read derives from OT/CTOT strand: C->T substitutions matter (C = methylated, T = unmethylated),

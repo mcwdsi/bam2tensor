@@ -40,16 +40,18 @@ uv run mypy src
 
 ```
 src/bam2tensor/
-  __init__.py      # Package version (1.4)
+  __init__.py      # Package version (1.5)
   __main__.py      # Click CLI entry point
   embedding.py     # GenomeMethylationEmbedding class (FASTA parsing, CpG indexing)
   functions.py     # Core extraction: extract_methylation_data_from_bam()
+  reference.py     # Reference genome download and caching utilities
 
 tests/
-  test_main.py       # CLI tests
-  test_functions.py  # Core function tests
-  test_embedding.py  # Embedding class tests
-  test_duplication.py
+  test_main.py        # CLI tests
+  test_functions.py   # Core function tests
+  test_embedding.py   # Embedding class tests
+  test_duplication.py  # Read duplication bug tests
+  test_reference.py   # Reference download/caching tests
   test.bam, test.bam.bai, test_fasta.fa  # Test fixtures
 ```
 
@@ -112,6 +114,7 @@ xdoctest validates code examples in docstrings. Important rules:
 
 ### Methylation Strand Detection
 - Biscuit aligner: YD tag
+- bwameth aligner: YD tag (same format as Biscuit)
 - gem3/blueprint aligner: XB tag
 
 ### Dependencies
@@ -138,4 +141,34 @@ xdoctest validates code examples in docstrings. Important rules:
 **Running the tool**:
 ```bash
 uv run bam2tensor --input-path input.bam --reference-fasta ref.fa
+# Or with auto-download:
+uv run bam2tensor --input-path input.bam --download-reference hg38
 ```
+
+### Reference Genome Downloads
+- Downloaded references are cached in `~/.cache/bam2tensor/`
+- Available genomes: hg38, hg19, mm10, T2T-CHM13
+- The `reference.py` module manages downloads from UCSC/NCBI
+
+### Chromosome Naming
+- BAM chromosome names must match the reference FASTA chromosome names
+- UCSC style: `chr1`, `chr2`, ... (used by hg38, hg19 from UCSC)
+- Ensembl style: `1`, `2`, ... (used by GRCh38 from Ensembl)
+- bam2tensor detects mismatches and provides actionable error messages
+- Use `--expected-chromosomes` to match your naming convention
+
+## AI Agent Guidelines
+
+When working on this codebase as an AI coding agent:
+
+- **Always run `nox`** (or at minimum `nox --session=pre-commit` and `nox --session=tests`) before committing changes
+- **Darglint long strictness**: Every parameter, return value, and explicitly-raised exception must be documented in Google-style docstrings
+- **Do not add exceptions to `Raises:`** that are not explicitly raised with a `raise` statement in that function
+- **Run `nox --session=xdoctest`** to validate docstring examples; use `# xdoctest: +SKIP` for examples requiring external files
+- **Test BAM**: `tests/test.bam` uses chromosomes `chr1`, `chr2`, `chr3` matching `tests/test_fasta.fa`
+- **Creating test BAMs**: Follow the pattern in `tests/test_duplication.py` (pysam to create BAMs, then `pysam.index()`)
+- **Dependency management**: Uses `uv` (not pip/poetry)
+- **Type checking**: mypy with `strict = false` but `check_untyped_defs = true`
+- **Do not modify** `noxfile.py` (excluded from ruff checks)
+- **New CLI options**: Add to both Click decorators and the `main()` function signature in `__main__.py`
+- **Cache files**: `.cache.json.gz` files are written to the current working directory

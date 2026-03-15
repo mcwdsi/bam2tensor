@@ -1,7 +1,8 @@
 """Command-line interface for bam2tensor.
 
 This module provides the CLI entry point for bam2tensor, allowing users to
-extract methylation data from BAM files via the command line.
+extract methylation data from bisulfite-sequencing (BS-seq) and enzymatic
+methylation sequencing (EM-seq) BAM files via the command line.
 
 Example:
     Basic usage with a single BAM file::
@@ -16,9 +17,14 @@ Example:
 
         $ bam2tensor --input-path sample.bam --reference-fasta ref.fa \\
             --genome-name hg38 --quality-limit 30 --verbose
+
+    Auto-download a reference genome::
+
+        $ bam2tensor --input-path sample.bam --download-reference hg38
 """
 
 import os
+import sys
 import time
 import click
 
@@ -28,6 +34,11 @@ from bam2tensor.embedding import GenomeMethylationEmbedding
 
 from bam2tensor.functions import (
     extract_methylation_data_from_bam,
+)
+from bam2tensor.reference import (
+    KNOWN_GENOMES,
+    download_reference as download_reference_fn,
+    list_available_genomes,
 )
 
 
@@ -76,7 +87,40 @@ def get_input_bams(input_path: str) -> list:
         raise ValueError(f"Input path {input_path} is not a file or a directory.")
 
 
-def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
+def get_output_path(input_bam: str, output_dir: str | None = None) -> str:
+    """Compute the output file path for a given input BAM file.
+
+    Generates the path for the ``.methylation.npz`` output file. If an
+    output directory is specified, the file is placed there using only the
+    basename of the input file. Otherwise, the output file is placed next
+    to the input BAM file.
+
+    Args:
+        input_bam: Path to the input BAM file.
+        output_dir: Optional output directory. If None, the output file
+            is placed in the same directory as the input BAM.
+
+    Returns:
+        The full path to the output ``.methylation.npz`` file.
+
+    Example:
+        >>> get_output_path("/data/sample.bam")
+        '/data/sample.methylation.npz'
+
+        >>> get_output_path("/data/sample.bam", "/output")
+        '/output/sample.methylation.npz'
+    """
+    basename = os.path.splitext(os.path.basename(input_bam))[0] + ".methylation.npz"
+    if output_dir:
+        return os.path.join(output_dir, basename)
+    return os.path.splitext(input_bam)[0] + ".methylation.npz"
+
+
+def validate_input_output(
+    bams_to_process: list,
+    overwrite: bool,
+    output_dir: str | None = None,
+) -> None:
     """Validate that input BAM files are readable and output paths are writable.
 
     Checks each BAM file in the list to ensure it can be read, and verifies
@@ -88,6 +132,8 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
         overwrite: If True, allows overwriting existing output files.
             If False and an output file exists, it will be skipped during
             processing (not validated here).
+        output_dir: Optional output directory for .methylation.npz files.
+            If None, output files are placed next to the input BAM files.
 
     Raises:
         ValueError: If any input BAM file is not readable, or if the
@@ -102,7 +148,7 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
         if not os.access(bam_file, os.R_OK):
             raise ValueError(f"Input file is not readable: {bam_file}")
 
-        output_file = os.path.splitext(bam_file)[0] + ".methylation.npz"
+        output_file = get_output_path(bam_file, output_dir)
         if os.path.exists(output_file):
             if overwrite and os.access(output_file, os.W_OK):
                 print(
@@ -114,7 +160,7 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
 
 
 @click.command(
-    help="Extract read-level methylation data from an aligned .bam file and export the data as a SciPy sparse matrix."
+    help="Extract read-level methylation data from an aligned bisulfite-seq or EM-seq .bam file and export the data as a SciPy sparse matrix."
 )
 @click.version_option()
 @click.option(
@@ -126,7 +172,8 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
 @click.option(
     "--genome-name",
     help="A custom string referring to your genome name, used to save a cache file (e.g. hg38, hg39-no-alt, etc.).",
-    required=True,
+    required=False,
+    default=None,
     type=str,
 )
 @click.option(
@@ -134,12 +181,13 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
     # Useful to filter out alt chromosomes, etc.
     help="A comma-separated list of chromosomes to expect in the .fa genome. Defaults to hg38 chromosomes.",
     required=False,
-    default=",".join(["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]),
+    default=None,
 )
 @click.option(
     "--reference-fasta",
     help="Reference genome fasta file (critical to determine CpG sites).",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True, file_okay=True, dir_okay=False, readable=True),
 )
 @click.option(
@@ -157,16 +205,38 @@ def validate_input_output(bams_to_process: list, overwrite: bool) -> None:
     type=bool,
 )
 @click.option("--overwrite", help="Overwrite output file if it exists.", is_flag=True)
+@click.option(
+    "--output-dir",
+    help="Output directory for .methylation.npz files. Defaults to same directory as the input BAM.",
+    required=False,
+    default=None,
+    type=click.Path(file_okay=False, dir_okay=True),
+)
+@click.option(
+    "--download-reference",
+    help="Download and cache a known reference genome (e.g. hg38, hg19, mm10, T2T-CHM13). Use --list-genomes to see options.",
+    required=False,
+    default=None,
+    type=click.Choice(sorted(KNOWN_GENOMES.keys()), case_sensitive=False),
+)
+@click.option(
+    "--list-genomes",
+    help="List available reference genomes for download and exit.",
+    is_flag=True,
+)
 def main(
     input_path: str,
-    genome_name: str,
-    expected_chromosomes: str,
-    reference_fasta: str,
+    genome_name: str | None,
+    expected_chromosomes: str | None,
+    reference_fasta: str | None,
     quality_limit: int,
     verbose: bool,
     skip_cache: bool,
     debug: bool,
     overwrite: bool,
+    output_dir: str | None,
+    download_reference: str | None,
+    list_genomes: bool,
 ) -> None:
     """Extract methylation data from BAM files and save as sparse matrices.
 
@@ -186,11 +256,15 @@ def main(
     Args:
         input_path: Path to a BAM file or directory to process recursively.
         genome_name: Identifier for the genome (e.g., "hg38"). Used for
-            naming the CpG site cache file.
+            naming the CpG site cache file. If not provided, inferred from
+            ``--download-reference``.
         expected_chromosomes: Comma-separated list of chromosomes to process.
-            Chromosomes not in this list are skipped.
+            Chromosomes not in this list are skipped. If not provided,
+            defaults to hg38 chromosomes or is inferred from
+            ``--download-reference``.
         reference_fasta: Path to the reference genome FASTA file. Must match
-            the genome used for alignment.
+            the genome used for alignment. Not required if
+            ``--download-reference`` is used.
         quality_limit: Minimum mapping quality (MAPQ) threshold. Reads below
             this quality are excluded.
         verbose: If True, print detailed progress information.
@@ -199,17 +273,69 @@ def main(
         debug: If True, enable extensive validation and debug output.
         overwrite: If True, overwrite existing output files. Otherwise,
             skip BAM files that already have output.
+        output_dir: Optional output directory for .methylation.npz files.
+            If not provided, output files are written next to the input BAMs.
+        download_reference: If specified, download and cache this reference
+            genome (e.g., "hg38") instead of requiring ``--reference-fasta``.
+        list_genomes: If True, list available reference genomes and exit.
+
+    Raises:
+        UsageError: If neither ``--reference-fasta`` nor
+            ``--download-reference`` is specified, or if ``--genome-name``
+            is missing when not using ``--download-reference``.
 
     Note:
         This function is decorated with Click options and is typically
         invoked via the command line rather than called directly.
     """
+    # Handle --list-genomes: print available genomes and exit
+    if list_genomes:
+        genomes = list_available_genomes()
+        print("Available reference genomes for --download-reference:\n")
+        for name, info in sorted(genomes.items()):
+            print(f"  {name:12s}  {info['description']}")
+            print(f"               Chromosomes: {info['expected_chromosomes'][:50]}...")
+            print()
+        sys.exit(0)
+
+    # Handle --download-reference: download genome and set defaults
+    if download_reference:
+        genome_info = KNOWN_GENOMES[download_reference]
+        fasta_path = download_reference_fn(download_reference, verbose=verbose)
+        reference_fasta = str(fasta_path)
+        if genome_name is None:
+            genome_name = download_reference
+        if expected_chromosomes is None:
+            expected_chromosomes = genome_info["expected_chromosomes"]
+
+    # Validate that we have a reference FASTA (either via --reference-fasta or --download-reference)
+    if reference_fasta is None:
+        raise click.UsageError(
+            "Either --reference-fasta or --download-reference must be specified."
+        )
+
+    # Apply defaults for genome-name and expected-chromosomes
+    if genome_name is None:
+        raise click.UsageError(
+            "--genome-name is required when not using --download-reference."
+        )
+    if expected_chromosomes is None:
+        expected_chromosomes = ",".join(
+            ["chr" + str(i) for i in range(1, 23)] + ["chrX", "chrY"]
+        )
+
+    # Create output directory if specified
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     time_start = time.time()
     # Print run information
     print(f"Genome name: {genome_name}")
     print(f"Reference fasta: {reference_fasta}")
     print(f"Expected chromosomes: {expected_chromosomes}")
     print(f"Input path: {input_path}")
+    if output_dir:
+        print(f"Output directory: {output_dir}")
     print(f"\nLoading (or generating) methylation embedding for: {genome_name}")
 
     # Create (or load) a GenomeMethylationEmbedding object
@@ -236,6 +362,7 @@ def main(
     validate_input_output(
         bams_to_process=bams_to_process,
         overwrite=overwrite,
+        output_dir=output_dir,
     )
 
     #################################################
@@ -246,7 +373,7 @@ def main(
     skip_count = 0
     for i, input_bam in enumerate(bams_to_process):
         time_bam = time.time()
-        output_file = os.path.splitext(input_bam)[0] + ".methylation.npz"
+        output_file = get_output_path(input_bam, output_dir)
         # Extract methylation data as a COO sparse matrix
         print("\n" + "=" * 80)
         print(f"Processing BAM file {i+1} of {len(bams_to_process)}")

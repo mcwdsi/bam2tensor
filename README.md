@@ -20,7 +20,7 @@
 [pre-commit]: https://github.com/pre-commit/pre-commit
 [black]: https://github.com/psf/black
 
-**bam2tensor** is a Python package for converting bisulfite-sequencing `.bam` files to sparse tensor representations of DNA methylation data. It extracts read-level methylation states from CpG sites and outputs efficient sparse COO matrices as `.npz` files, ready for deep learning pipelines.
+**bam2tensor** is a Python package for converting bisulfite-sequencing (BS-seq) and enzymatic methylation sequencing (EM-seq) `.bam` files to sparse tensor representations of DNA methylation data. It extracts read-level methylation states from CpG sites and outputs efficient sparse COO matrices as `.npz` files, ready for deep learning pipelines.
 
 ![bam2tensor overview figure](https://raw.githubusercontent.com/mcwdsi/bam2tensor/main/docs/nano-banana-overview-shrunk.png)
 
@@ -32,7 +32,9 @@
 - [Quick Start](#quick-start)
 - [Usage](#usage)
   - [Basic Usage](#basic-usage)
+  - [Auto-Download Reference Genomes](#auto-download-reference-genomes)
   - [Processing Multiple BAM Files](#processing-multiple-bam-files)
+  - [Custom Output Directory](#custom-output-directory)
   - [Using a Custom Genome](#using-a-custom-genome)
   - [Command-Line Options](#command-line-options)
 - [Output Data Structure](#output-data-structure)
@@ -43,6 +45,7 @@
 - [Performance Tips](#performance-tips)
 - [API Reference](#api-reference)
 - [Contributing](#contributing)
+- [AI Coding Agents](#ai-coding-agents)
 - [License](#license)
 - [Credits](#credits)
 
@@ -114,7 +117,7 @@ bam2tensor \
 
 ### Basic Usage
 
-Process a single bisulfite-sequencing BAM file:
+Process a single bisulfite-sequencing or EM-seq BAM file:
 
 ```bash
 bam2tensor \
@@ -127,6 +130,22 @@ This will:
 1. Parse the reference FASTA to identify all CpG sites (cached for future runs)
 2. Extract methylation states from each read in the BAM file
 3. Output a sparse matrix to `aligned_reads.methylation.npz`
+
+### Auto-Download Reference Genomes
+
+Don't have a local reference FASTA? bam2tensor can download and cache common reference genomes automatically:
+
+```bash
+# Download hg38 and process a BAM file in one command
+bam2tensor \
+    --input-path sample.bam \
+    --download-reference hg38
+
+# List available genomes
+bam2tensor --input-path sample.bam --list-genomes
+```
+
+Available genomes: `hg38`, `hg19`, `mm10`, `T2T-CHM13`. Downloaded references are cached in `~/.cache/bam2tensor/` for future runs.
 
 ### Processing Multiple BAM Files
 
@@ -141,6 +160,20 @@ bam2tensor \
 ```
 
 Each BAM file will generate a corresponding `.methylation.npz` file in the same location.
+
+### Custom Output Directory
+
+Write output files to a specific directory instead of next to the input BAMs:
+
+```bash
+bam2tensor \
+    --input-path /shared/bams/ \
+    --reference-fasta /shared/ref/GRCh38.fa \
+    --genome-name hg38 \
+    --output-dir /scratch/methylation_output/
+```
+
+This is useful on HPC clusters where input directories may be read-only or on slow shared storage.
 
 ### Using a Custom Genome
 
@@ -205,6 +238,9 @@ Options:
 | `--skip-cache` | Force regeneration of CpG site cache. Useful if you've modified the reference or chromosome list. |
 | `--debug` | Enable extensive validation and debug output. Slower but useful for troubleshooting. |
 | `--overwrite` | Overwrite existing `.methylation.npz` files. Without this flag, existing outputs are skipped. |
+| `--output-dir` | Write `.methylation.npz` files to this directory instead of next to the input BAMs. Created automatically if it doesn't exist. |
+| `--download-reference` | Download and cache a known reference genome. Choices: `hg38`, `hg19`, `mm10`, `T2T-CHM13`. Replaces `--reference-fasta`. |
+| `--list-genomes` | List available reference genomes for `--download-reference` and exit. |
 
 ## Output Data Structure
 
@@ -342,14 +378,17 @@ dense_tensor = torch.FloatTensor(dense_region)
 
 ## Supported Aligners
 
-bam2tensor supports BAM files from bisulfite-aware aligners that include strand information tags:
+bam2tensor supports BAM files from bisulfite-aware and EM-seq-aware aligners that include strand information tags:
 
 | Aligner | Tag | Values |
 |---------|-----|--------|
 | [Biscuit](https://huishenlab.github.io/biscuit/) | `YD` | `f` (forward/OT/CTOT), `r` (reverse/OB/CTOB) |
+| [bwameth](https://github.com/brentp/bwameth) | `YD` | `f` (forward/OT/CTOT), `r` (reverse/OB/CTOB) |
 | [gem3](https://github.com/gemtools/gemtools) / [Blueprint](http://www.blueprint-epigenome.eu/) | `XB` | `C` (forward), `G` (reverse) |
 
-These tags indicate which strand the original bisulfite-converted DNA came from, which is essential for correctly interpreting C/T as methylated/unmethylated.
+These tags indicate which strand the original bisulfite/EM-seq-converted DNA came from, which is essential for correctly interpreting C/T as methylated/unmethylated.
+
+**Note:** EM-seq (enzymatic methyl-seq) data produces the same C-to-T conversion pattern as bisulfite sequencing and is fully supported when aligned with any of the above tools.
 
 ## Performance Tips
 
@@ -437,6 +476,16 @@ nox --session=pre-commit  # Linting
 uv run black src tests
 uv run ruff check --fix src tests
 ```
+
+## AI Coding Agents
+
+This project includes a `CLAUDE.md` file with detailed guidance for AI coding agents (Claude Code, Copilot, Cursor, etc.). If you're using an AI assistant to contribute, please ensure it follows the project conventions described there.
+
+Key points for AI agents:
+- Run `nox` before committing to validate all checks pass
+- Follow Google-style docstrings validated by darglint (long strictness)
+- Use `uv sync` for dependency management
+- See `CLAUDE.md` for complete guidelines
 
 ## License
 

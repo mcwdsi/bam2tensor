@@ -1,9 +1,10 @@
 """bam2tensor: Convert BAM files to sparse tensor representations of DNA methylation.
 
-bam2tensor is a Python package for converting bisulfite-sequencing BAM files
-to sparse tensor representations of DNA methylation data. It extracts read-level
-methylation states from CpG sites and outputs efficient sparse COO matrices
-as .npz files, ready for deep learning pipelines.
+bam2tensor is a Python package for converting bisulfite-sequencing (BS-seq) and
+enzymatic methylation sequencing (EM-seq) BAM files to sparse tensor
+representations of DNA methylation data. It extracts read-level methylation
+states from CpG sites and outputs efficient sparse COO matrices as .npz files,
+ready for deep learning pipelines.
 
 Main Components:
     GenomeMethylationEmbedding: Class for managing CpG site positions and
