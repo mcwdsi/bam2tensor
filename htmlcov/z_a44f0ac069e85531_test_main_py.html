@@ -67,7 +67,7 @@
             <a id="nextFileLink" class="nav" href="z_a44f0ac069e85531_test_reference_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.13.1">coverage.py v7.13.1</a>,
-            created at 2026-03-15 23:10 +0000
+            created at 2026-03-15 23:48 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -198,7 +198,7 @@
     <p class="run run2"><span class="n"><a id="t114" href="#t114">114</a></span><span class="t">    <span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t115" href="#t115">115</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t116" href="#t116">116</a></span><span class="t">    <span class="key">assert</span> <span class="nam">result</span><span class="op">.</span><span class="nam">exit_code</span> <span class="op">==</span> <span class="num">0</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t117" href="#t117">117</a></span><span class="t">    <span class="key">assert</span> <span class="str">"Skipping this .bam"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span> <span class="key">or</span> <span class="str">"skipped"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span><span class="op">.</span><span class="nam">lower</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t117" href="#t117">117</a></span><span class="t">    <span class="key">assert</span> <span class="str">"Skipped"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span> <span class="key">or</span> <span class="str">"skipped"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span><span class="op">.</span><span class="nam">lower</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t118" href="#t118">118</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t119" href="#t119">119</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t120" href="#t120">120</a></span><span class="t"><span class="key">def</span> <span class="nam">test_main_missing_bam_index</span><span class="op">(</span><span class="nam">runner</span><span class="op">:</span> <span class="nam">CliRunner</span><span class="op">,</span> <span class="nam">tmp_path</span><span class="op">)</span> <span class="op">-></span> <span class="key">None</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
@@ -224,8 +224,8 @@
     <p class="pln"><span class="n"><a id="t140" href="#t140">140</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t141" href="#t141">141</a></span><span class="t">    <span class="com"># The main function catches FileNotFoundError and reports it</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t142" href="#t142">142</a></span><span class="t">    <span class="key">assert</span> <span class="nam">result</span><span class="op">.</span><span class="nam">exit_code</span> <span class="op">==</span> <span class="num">0</span>  <span class="com"># Should complete (with errors logged)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t143" href="#t143">143</a></span><span class="t">    <span class="key">assert</span> <span class="str">"Error"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span> <span class="key">or</span> <span class="str">"error"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span><span class="op">.</span><span class="nam">lower</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t144" href="#t144">144</a></span><span class="t">    <span class="key">assert</span> <span class="str">"1 errors occurred"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span> <span class="key">or</span> <span class="str">"had errors"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t143" href="#t143">143</a></span><span class="t">    <span class="key">assert</span> <span class="str">"ERROR"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span> <span class="key">or</span> <span class="str">"error"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span><span class="op">.</span><span class="nam">lower</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t144" href="#t144">144</a></span><span class="t">    <span class="key">assert</span> <span class="str">"Errors"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span> <span class="key">or</span> <span class="str">"errors"</span> <span class="key">in</span> <span class="nam">result</span><span class="op">.</span><span class="nam">output</span><span class="op">.</span><span class="nam">lower</span><span class="op">(</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t145" href="#t145">145</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t146" href="#t146">146</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t147" href="#t147">147</a></span><span class="t"><span class="key">def</span> <span class="nam">test_get_output_path_default</span><span class="op">(</span><span class="op">)</span> <span class="op">-></span> <span class="key">None</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
@@ -358,7 +358,7 @@
             <a class="nav" href="z_a44f0ac069e85531_test_reference_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.13.1">coverage.py v7.13.1</a>,
-            created at 2026-03-15 23:10 +0000
+            created at 2026-03-15 23:48 +0000
         </p>
     </div>
 </footer>
