@@ -5,15 +5,17 @@
 | Name                           |    Stmts |     Miss |   Branch |   BrPart |   Cover |   Missing |
 |------------------------------- | -------: | -------: | -------: | -------: | ------: | --------: |
 | src/bam2tensor/\_\_init\_\_.py |        1 |        0 |        0 |        0 |    100% |           |
-| src/bam2tensor/\_\_main\_\_.py |       85 |        3 |       32 |        3 |     95% |108, 113, 297 |
+| src/bam2tensor/\_\_main\_\_.py |      121 |       12 |       54 |        6 |     87% |154, 159, 303-309, 319, 323, 424 |
 | src/bam2tensor/embedding.py    |       98 |        0 |       42 |        0 |    100% |           |
-| src/bam2tensor/functions.py    |      100 |       20 |       58 |        6 |     75% |180-184, 196, 248-258, 278, 303-305, 307-310 |
+| src/bam2tensor/functions.py    |      120 |       20 |       64 |        6 |     78% |261-265, 277, 329-339, 359, 384-386, 388-391 |
+| src/bam2tensor/reference.py    |       63 |       29 |       16 |        2 |     53% |77-79, 177->179, 181-225 |
 | tests/\_\_init\_\_.py          |        0 |        0 |        0 |        0 |    100% |           |
 | tests/test\_duplication.py     |       27 |        0 |        0 |        0 |    100% |           |
 | tests/test\_embedding.py       |       69 |        0 |        4 |        0 |    100% |           |
-| tests/test\_functions.py       |       16 |        0 |        0 |        0 |    100% |           |
-| tests/test\_main.py            |       51 |        0 |        0 |        0 |    100% |           |
-| **TOTAL**                      |  **447** |   **23** |  **136** |    **9** | **92%** |           |
+| tests/test\_functions.py       |       55 |        0 |        0 |        0 |    100% |           |
+| tests/test\_main.py            |       92 |        0 |        0 |        0 |    100% |           |
+| tests/test\_reference.py       |       67 |        0 |        4 |        0 |    100% |           |
+| **TOTAL**                      |  **713** |   **61** |  **184** |   **14** | **89%** |           |
 
 
 ## Setup coverage badge
