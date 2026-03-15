@@ -23,6 +23,7 @@ Example:
         $ bam2tensor --input-path sample.bam --download-reference hg38
 """
 
+import math
 import os
 import sys
 import time
@@ -40,6 +41,33 @@ from bam2tensor.reference import (
     download_reference as download_reference_fn,
     list_available_genomes,
 )
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format an elapsed time as a human-readable string.
+
+    For durations under 60 seconds, returns seconds only. For longer
+    durations, returns minutes and seconds.
+
+    Args:
+        seconds: Elapsed time in seconds.
+
+    Returns:
+        A formatted string such as ``"12.34 seconds"`` or
+        ``"3 min 7.12 sec"``.
+
+    Example:
+        >>> _format_elapsed(5.123)
+        '5.12 seconds'
+
+        >>> _format_elapsed(185.7)
+        '3 min 5.70 sec'
+    """
+    if seconds < 60:
+        return f"{seconds:.2f} seconds"
+    mins = math.floor(seconds / 60)
+    secs = seconds - mins * 60
+    return f"{mins} min {secs:.2f} sec"
 
 
 def get_input_bams(input_path: str) -> list:
@@ -347,7 +375,7 @@ def main(
         verbose=verbose,
     )
 
-    print(f"\nTime elapsed: {time.time() - time_start:.2f} seconds")
+    print(f"\nTime elapsed: {_format_elapsed(time.time() - time_start)}")
 
     #################################################
     # Establish input/output for .bam files
@@ -405,8 +433,8 @@ def main(
         scipy.sparse.save_npz(output_file, methylation_data_coo, compressed=True)
 
         # Report performance time
-        print(f"\nTime for this bam: {time.time() - time_bam:.2f} seconds")
-        print(f"\nTotal time elapsed: {time.time() - time_start:.2f} seconds")
+        print(f"\nTime for this bam: {_format_elapsed(time.time() - time_bam)}")
+        print(f"\nTotal time elapsed: {_format_elapsed(time.time() - time_start)}")
 
     if errors_list:
         print(f"\n{len(errors_list)} errors occurred during processing:")
@@ -417,7 +445,7 @@ def main(
     print(f"\n{len(bams_to_process) - skip_count} .bam files were processed.")
     print(f"\t{skip_count} .bam files were skipped due to existing output files.")
     print(f"\t{len(errors_list)} .bam files had errors (missing index files?).")
-    print(f"\nTotal time elapsed: {time.time() - time_start:.2f} seconds")
+    print(f"\nTotal time elapsed: {_format_elapsed(time.time() - time_start)}")
 
 
 if __name__ == "__main__":

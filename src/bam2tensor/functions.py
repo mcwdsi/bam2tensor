@@ -54,6 +54,10 @@ import bisect
 from tqdm import tqdm
 from bam2tensor.embedding import GenomeMethylationEmbedding
 
+# BAM flag bits for reads to skip: duplicate (0x400), qcfail (0x200),
+# secondary (0x100), supplementary (0x800).
+_SKIP_FLAGS = 0x400 | 0x200 | 0x100 | 0x800
+
 
 def check_chromosome_overlap(
     bam_references: tuple[str, ...] | list[str],
@@ -223,7 +227,7 @@ def extract_methylation_data_from_bam(
     """
     try:
         input_bam_object = pysam.AlignmentFile(  # type: ignore # pylint: disable=no-member
-            input_bam, "rb", require_index=True, threads=1
+            input_bam, "rb", require_index=True, threads=4
         )
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"Index missing for bam file?: {input_bam}") from exc
@@ -267,13 +271,39 @@ def extract_methylation_data_from_bam(
         for aligned_segment in iter_reads:
             if aligned_segment.mapping_quality < quality_limit:
                 continue
-            if aligned_segment.is_duplicate:
+
+            # Single bitwise check replaces 4 separate flag checks:
+            # duplicate (0x400), qcfail (0x200), secondary (0x100), supplementary (0x800)
+            if aligned_segment.flag & _SKIP_FLAGS:
                 continue
-            if aligned_segment.is_qcfail:
-                continue
-            if aligned_segment.is_secondary:
-                continue
-            if aligned_segment.is_supplementary:
+
+            # Check the bisulfite strand tag early (before CpG lookup) since
+            # ~50% of reads are on the daughter strand and can be skipped
+            # without the more expensive bisect/get_aligned_pairs work.
+            bisulfite_parent_strand_is_reverse = None
+            if aligned_segment.has_tag("YD"):  # Biscuit / bwameth tag
+                yd_tag = aligned_segment.get_tag("YD")
+                if yd_tag == "f":  # Forward = C→T
+                    # This read derives from OT/CTOT strand: C->T substitutions matter (C = methylated, T = unmethylated),
+                    bisulfite_parent_strand_is_reverse = False
+                elif yd_tag == "r":  # Reverse = G→A
+                    # This read derives from the OB/CTOB strand: G->A substitutions matter (G = methylated, A = unmethylated)
+                    bisulfite_parent_strand_is_reverse = True
+            elif aligned_segment.has_tag("XB"):  # gem3 / blueprint tag
+                xb_tag = aligned_segment.get_tag(
+                    "XB"
+                )  # XB:C = Forward / Reference was CG
+                if xb_tag == "C":
+                    bisulfite_parent_strand_is_reverse = False
+                elif xb_tag == "G":  # XB:G = Reverse / Reference was GA
+                    bisulfite_parent_strand_is_reverse = True
+
+            # We have paired-end reads; one half (the "parent strand") has the methylation data.
+            # The other half (the "daughter strand") was the complement created by PCR, which we don't care about.
+            if bisulfite_parent_strand_is_reverse != aligned_segment.is_reverse:
+                # Skip if we're not on the bisulfite-converted parent strand.
+                if debug:
+                    print("\tNot on methylated strand, ignoring.")
                 continue
 
             # Use bisect to find CpGs covered by this read
@@ -318,33 +348,6 @@ def extract_methylation_data_from_bam(
                 ] = read_number
 
             # TODO: We ignore paired/unpaired read status for now. Should we treat paired reads / overlapping reads differently?
-
-            ## Read tags and ensure we're on the correct bisulfite-converted strand
-            bisulfite_parent_strand_is_reverse = None
-            if aligned_segment.has_tag("YD"):  # Biscuit / bwameth tag
-                yd_tag = aligned_segment.get_tag("YD")
-                if yd_tag == "f":  # Forward = C→T
-                    # This read derives from OT/CTOT strand: C->T substitutions matter (C = methylated, T = unmethylated),
-                    bisulfite_parent_strand_is_reverse = False
-                elif yd_tag == "r":  # Reverse = G→A
-                    # This read derives from the OB/CTOB strand: G->A substitutions matter (G = methylated, A = unmethylated)
-                    bisulfite_parent_strand_is_reverse = True
-            elif aligned_segment.has_tag("XB"):  # gem3 / blueprint tag
-                xb_tag = aligned_segment.get_tag(
-                    "XB"
-                )  # XB:C = Forward / Reference was CG
-                if xb_tag == "C":
-                    bisulfite_parent_strand_is_reverse = False
-                elif xb_tag == "G":  # XB:G = Reverse / Reference was GA
-                    bisulfite_parent_strand_is_reverse = True
-
-            # We have paired-end reads; one half should (the "parent strand") has the methylation data.
-            # The other half (the "daughter strand") was the complement created by PCR, which we don't care about.
-            if bisulfite_parent_strand_is_reverse != aligned_segment.is_reverse:
-                # Skip if we're not on the bisulfite-converted parent strand.
-                if debug:
-                    print("\tNot on methylated strand, ignoring.")
-                continue
 
             # get_aligned_pairs returns a list of tuples of (read_pos, ref_pos)
             # We filter this to only include the specific CpG sites from above
