@@ -770,7 +770,7 @@ def test_bismark_read_no_cpg_overlap(tmp_path):
     pysam.index(str(bam_path))
 
     matrix = functions.extract_methylation_data_from_bam(
-        input_bam=bam_path, genome_methylation_embedding=emb
+        input_bam=str(bam_path), genome_methylation_embedding=emb
     )
     assert matrix.shape[0] == 0
 

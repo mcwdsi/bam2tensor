@@ -103,6 +103,7 @@ xdoctest validates code examples in docstrings. Important rules:
 - Test fixtures: `test.bam`, `test.bam.bai`, `test_fasta.fa`
 - Run tests across Python 3.11, 3.12, 3.13 via nox
 - Coverage reporting enabled (minimum threshold: 10%)
+- **Typeguard**: `nox --session=typeguard` runs runtime type checking. All function arguments must match their type annotations exactly — pass `str`, not `Path`, when the signature says `str`. This catches real bugs that mypy misses (e.g., passing `pathlib.PosixPath` to a `str` parameter).
 
 ## Key Technical Details
 
