@@ -30,13 +30,23 @@ process multiple BAMs concurrently. However, the README already documents
 over resource allocation (especially on HPC with SLURM). Built-in
 parallelism would mainly help casual users who don't have GNU parallel.
 
-## Features
+## Design Decisions
 
-### Bismark support
+### Bismark: XM tag takes priority, no strand filtering
 
-Bismark is the most widely used bisulfite aligner but uses `XM` tags with
-a different encoding (`Z`/`z` for methylated/unmethylated CpG, `H`/`h` for
-CHH, etc.) rather than the `YD`/`XB` strand tags. Adding Bismark support
-would require parsing the `XM` string to extract CpG methylation states
-directly, bypassing the current strand-based C/T logic. This is a larger
-change but would significantly expand the user base.
+Bismark support (added in this codebase) uses the `XM` tag which contains
+pre-resolved methylation calls. Key decisions:
+
+- **XM checked first**: If a read has an `XM` tag, the Bismark path is
+  used regardless of whether `YD`/`XB` tags are also present. This is
+  correct because Bismark's calls are authoritative.
+- **No strand filtering**: Unlike Biscuit/bwameth, both reads in a
+  Bismark pair carry valid `XM` tags. All reads are processed (no
+  parent/daughter strand skip). This means Bismark BAMs produce ~2x
+  more rows in the output matrix than Biscuit BAMs for the same data.
+- **Non-CpG context**: `XM` characters other than `Z`/`z` at CpG
+  reference positions (e.g., `H`, `h`, `X`, `x`, `.`) are recorded as
+  -1, consistent with the existing "no data" encoding.
+- **Paired-end overlap**: If read1 and read2 in a pair overlap the same
+  CpG site, both get separate rows. This is the same behavior as for
+  Biscuit. Users should run `deduplicate_bismark` upstream if needed.

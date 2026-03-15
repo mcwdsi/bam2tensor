@@ -21,6 +21,7 @@ Methylation State Encoding:
 
 Supported Aligners:
     The module supports BAM files from aligners that provide strand information:
+    - Bismark: Uses the XM tag (Z=methylated CpG, z=unmethylated CpG)
     - Biscuit: Uses the YD tag (f=forward, r=reverse)
     - bwameth: Uses the YD tag (f=forward, r=reverse), identical to Biscuit
     - gem3/Blueprint: Uses the XB tag (C=forward, G=reverse)
@@ -150,13 +151,21 @@ def extract_methylation_data_from_bam(
         - Duplicate reads are excluded
         - QC-failed reads are excluded
         - Secondary and supplementary alignments are excluded
-        - Only reads on the bisulfite-converted parent strand are processed
+        - For Biscuit/bwameth/gem3: only parent-strand reads are processed
+        - For Bismark: all reads are processed (XM tag has pre-resolved calls)
 
-    For each qualifying read, the function:
-        1. Uses binary search to find CpG sites within the read's alignment
-        2. Checks the bisulfite strand tag (YD or XB) to determine strand
+    Two extraction paths are supported, detected automatically per-read:
+
+    **Bismark path** (XM tag present):
+        1. Uses binary search to find CpG sites within the read
+        2. Reads the XM methylation call string directly
+        3. Records: Z=methylated(1), z=unmethylated(0), other CpG=-1
+
+    **Biscuit/bwameth/gem3 path** (YD or XB tag):
+        1. Checks the strand tag to filter daughter-strand reads
+        2. Uses binary search to find CpG sites within the read
         3. Extracts the base at each CpG position from the read sequence
-        4. Records methylation state: C=methylated(1), T=unmethylated(0), other=-1
+        4. Records: C=methylated(1), T=unmethylated(0), other=-1
 
     Args:
         input_bam: Path to the input BAM file. The file must be indexed
@@ -277,9 +286,85 @@ def extract_methylation_data_from_bam(
             if aligned_segment.flag & _SKIP_FLAGS:
                 continue
 
-            # Check the bisulfite strand tag early (before CpG lookup) since
-            # ~50% of reads are on the daughter strand and can be skipped
-            # without the more expensive bisect/get_aligned_pairs work.
+            # ============================================================
+            # Bismark path: XM tag contains pre-resolved methylation calls.
+            # No strand filtering needed — Bismark already resolved strand
+            # and encoded calls as Z (methylated CpG) / z (unmethylated CpG).
+            # Both reads in a pair carry valid XM tags.
+            # ============================================================
+            if aligned_segment.has_tag("XM"):
+                xm_tag: str = aligned_segment.get_tag("XM")  # type: ignore[assignment]
+
+                # Find CpG sites covered by this read
+                start_idx = bisect.bisect_left(
+                    cpg_sites, aligned_segment.reference_start + 1
+                )
+                end_idx = bisect.bisect_right(cpg_sites, aligned_segment.reference_end)
+                if start_idx >= end_idx:
+                    continue
+
+                cpgs_within_read_set = set(cpg_sites[start_idx:end_idx])
+
+                # Map read positions to reference positions, filter to CpG sites
+                this_segment_cpgs = [
+                    e
+                    for e in aligned_segment.get_aligned_pairs(matches_only=True)
+                    if e[1] + 1 in cpgs_within_read_set
+                ]
+                if not this_segment_cpgs:
+                    continue
+
+                if debug:
+                    print(f"Query (Bismark): {aligned_segment.query_name}")
+
+                has_cpg_data = False
+                for query_pos, ref_pos in this_segment_cpgs:
+                    # Bounds check: XM tag should match query length, but be defensive
+                    if query_pos >= len(xm_tag):
+                        continue
+
+                    xm_char = xm_tag[query_pos]
+                    if xm_char == "Z":
+                        coo_data.append(1)  # Methylated CpG
+                    elif xm_char == "z":
+                        coo_data.append(0)  # Unmethylated CpG
+                    else:
+                        # Non-CpG context at a CpG site (shouldn't happen
+                        # normally, but possible with edge-case alignments)
+                        coo_data.append(-1)
+
+                    coo_row.append(read_number)
+                    coo_col.append(
+                        genome_methylation_embedding.genomic_position_to_embedding(
+                            chrom,
+                            ref_pos + 1,
+                        )
+                    )
+                    has_cpg_data = True
+
+                    if debug:
+                        print(f"\t{query_pos} {ref_pos} XM={xm_char}")
+
+                if has_cpg_data:
+                    if debug:
+                        # Ensure each read is only seen once
+                        read_key = aligned_segment.query_name + (  # type: ignore
+                            "_1" if aligned_segment.is_read1 else "_2"
+                        )
+                        assert (
+                            read_key not in debug_read_name_to_row_number
+                        ), "Read seen twice!"
+                        debug_read_name_to_row_number[read_key] = read_number
+                        print("************************************************\n")
+                    read_number += 1
+
+                continue  # Skip the Biscuit/bwameth/gem3 path below
+
+            # ============================================================
+            # Biscuit / bwameth / gem3 path: use strand tags (YD / XB).
+            # Check the strand tag early (before CpG lookup) since ~50% of
+            # reads are on the daughter strand and can be skipped.
+            # ============================================================
             bisulfite_parent_strand_is_reverse = None
             if aligned_segment.has_tag("YD"):  # Biscuit / bwameth tag
                 yd_tag = aligned_segment.get_tag("YD")
@@ -334,9 +419,9 @@ def extract_methylation_data_from_bam(
                 assert aligned_segment.has_tag(
                     "MD"
                 )  # Location of mismatches (methylation)
-                assert aligned_segment.has_tag(
-                    "YD"
-                )  # Bisulfite conversion strand label (f: OT/CTOT C->T or r: OB/CTOB G->A)
+                assert aligned_segment.has_tag("YD") or aligned_segment.has_tag(
+                    "XB"
+                )  # Bisulfite strand tag (YD for Biscuit/bwameth, XB for gem3)
 
                 # Ensure each read is only seen once
                 assert (

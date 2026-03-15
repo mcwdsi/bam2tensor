@@ -382,6 +382,7 @@ bam2tensor supports BAM files from bisulfite-aware and EM-seq-aware aligners tha
 
 | Aligner | Tag | Values |
 |---------|-----|--------|
+| [Bismark](https://github.com/FelixKrueger/Bismark) | `XM` | `Z` (methylated CpG), `z` (unmethylated CpG) |
 | [Biscuit](https://huishenlab.github.io/biscuit/) | `YD` | `f` (forward/OT/CTOT), `r` (reverse/OB/CTOB) |
 | [bwameth](https://github.com/brentp/bwameth) | `YD` | `f` (forward/OT/CTOT), `r` (reverse/OB/CTOB) |
 | [gem3](https://github.com/gemtools/gemtools) / [Blueprint](http://www.blueprint-epigenome.eu/) | `XB` | `C` (forward), `G` (reverse) |

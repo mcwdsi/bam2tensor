@@ -499,6 +499,281 @@ def test_skip_flags_constant():
     assert _SKIP_FLAGS == 0xF00
 
 
+# ======================================================================
+# Bismark XM tag tests
+# ======================================================================
+
+
+def _make_bismark_bam(tmp_path, reads, seq_len=154):
+    """Helper: create a BAM with Bismark-style XM tags.
+
+    The reference FASTA has CpGs at 0-based C positions 9, 20, 101, 112
+    (1-based: 10, 21, 102, 113). Sequence is 154bp.
+    Each read dict needs: name, flag, mapq, xm_string.
+    Optional: seq, start, extra_tags.
+    """
+    fasta_path = tmp_path / "ref.fa"
+    if not fasta_path.exists():
+        seq = (
+            "N" * 9
+            + "CG"
+            + "N" * 9
+            + "CG"
+            + "N" * 79
+            + "CG"
+            + "N" * 9
+            + "CG"
+            + "N" * 40
+        )
+        with open(fasta_path, "w") as f:
+            f.write(">chr1\n" + seq + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_bismark",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    bam_path = tmp_path / "bismark.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": seq_len, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        for r in reads:
+            a = pysam.AlignedSegment()
+            a.query_name = r["name"]
+            a.query_sequence = r.get("seq", "N" * seq_len)
+            a.flag = r["flag"]
+            a.reference_id = 0
+            a.reference_start = r.get("start", 0)
+            a.mapping_quality = r["mapq"]
+            a.cigartuples = [(0, seq_len)]
+            a.set_tag("XM", r["xm_string"])
+            for tag, val in r.get("extra_tags", []):
+                a.set_tag(tag, val)
+            out_bam.write(a)
+
+    pysam.index(str(bam_path))
+    return emb, str(bam_path)
+
+
+# 0-based query positions of the C in each CpG for the test FASTA.
+# The FASTA is: N*9 + CG + N*9 + CG + N*79 + CG + N*9 + CG + N*40 (154bp)
+_BISMARK_CPG_QPOS = [9, 20, 101, 112]
+
+
+def _make_xm_string(length, cpg_calls):
+    """Build an XM string of given length with CpG calls at specific 0-based positions.
+
+    cpg_calls is a dict of {0-based position: 'Z' or 'z'}.
+    All other positions are '.'.
+    """
+    chars = ["."] * length
+    for pos, call in cpg_calls.items():
+        chars[pos] = call
+    return "".join(chars)
+
+
+def test_bismark_methylated_cpgs(tmp_path):
+    """Bismark XM tag: Z at CpG positions → methylated (1)."""
+    xm = _make_xm_string(154, {p: "Z" for p in _BISMARK_CPG_QPOS})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 1
+    # All 4 CpG sites should be methylated (value=1)
+    assert matrix.nnz == 4
+    assert list(matrix.data) == [1, 1, 1, 1]
+
+
+def test_bismark_unmethylated_cpgs(tmp_path):
+    """Bismark XM tag: z at CpG positions → unmethylated (0)."""
+    xm = _make_xm_string(154, {p: "z" for p in _BISMARK_CPG_QPOS})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 1
+    # Unmethylated is stored as 0 in COO — but COO doesn't store literal zeros by default.
+    # scipy COO *does* store explicit zeros; they are in .data.
+    assert matrix.nnz == 4
+    assert list(matrix.data) == [0, 0, 0, 0]
+
+
+def test_bismark_mixed_methylation(tmp_path):
+    """Bismark XM tag: mix of Z and z at CpG positions."""
+    xm = _make_xm_string(154, {9: "Z", 20: "z", 101: "Z", 112: "z"})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 1
+    assert matrix.nnz == 4
+    assert list(matrix.data) == [1, 0, 1, 0]
+
+
+def test_bismark_no_cpg_in_xm(tmp_path):
+    """Bismark read with no CpG calls (all dots) → -1 for each CpG site."""
+    xm = "." * 154  # No CpG calls at all
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    # Dots at CpG positions → -1 values, but the read should still be counted
+    # if any CpG data was recorded
+    # Actually: '.' is non-CpG context → gets -1 at CpG reference positions
+    assert matrix.shape[0] == 1
+    assert all(v == -1 for v in matrix.data)
+
+
+def test_bismark_non_cpg_context_at_cpg_site(tmp_path):
+    """Bismark XM tag with non-CpG context chars (H, h, X, x) at CpG positions → -1."""
+    # Put CHH/CHG context markers at CpG reference positions
+    xm = _make_xm_string(154, {9: "H", 20: "h", 101: "X", 112: "x"})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 1
+    assert all(v == -1 for v in matrix.data)
+
+
+def test_bismark_duplicate_flag_skipped(tmp_path):
+    """Bismark reads with duplicate flag are still filtered out."""
+    xm = _make_xm_string(154, {9: "Z", 20: "Z"})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [{"name": "dup", "flag": 0x400, "mapq": 60, "xm_string": xm}],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 0
+
+
+def test_bismark_low_mapq_skipped(tmp_path):
+    """Bismark reads with low MAPQ are still filtered out."""
+    xm = _make_xm_string(154, {9: "Z", 20: "Z"})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [{"name": "lowq", "flag": 0, "mapq": 5, "xm_string": xm}],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 0
+
+
+def test_bismark_both_strands_processed(tmp_path):
+    """Bismark processes both forward and reverse reads (no strand filtering)."""
+    xm = _make_xm_string(154, {9: "Z", 20: "z"})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [
+            # Forward read
+            {"name": "fwd", "flag": 0, "mapq": 60, "xm_string": xm},
+            # Reverse read — Bismark should still process it
+            {"name": "rev", "flag": 0x10, "mapq": 60, "xm_string": xm},
+        ],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    # Both reads should be processed (no daughter-strand filtering for Bismark)
+    assert matrix.shape[0] == 2
+
+
+def test_bismark_xm_takes_priority_over_yd(tmp_path):
+    """If a read has both XM and YD tags, the Bismark (XM) path is used."""
+    # XM says methylated at all CpG positions
+    xm = _make_xm_string(154, {p: "Z" for p in _BISMARK_CPG_QPOS})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [
+            {
+                "name": "both_tags",
+                "flag": 0,
+                "mapq": 60,
+                "xm_string": xm,
+                # YD=r + flag=0 (forward) → would be daughter strand → skipped by YD path
+                "extra_tags": [("YD", "r")],
+            },
+        ],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    # XM path should process it (not skip as daughter strand)
+    assert matrix.shape[0] == 1
+    assert all(v == 1 for v in matrix.data)
+
+
+def test_bismark_debug_mode(tmp_path):
+    """Bismark path works correctly with debug=True."""
+    xm = _make_xm_string(154, {p: "Z" for p in _BISMARK_CPG_QPOS})
+    emb, bam_path = _make_bismark_bam(
+        tmp_path,
+        [{"name": "debug_read", "flag": 0, "mapq": 60, "xm_string": xm}],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb, debug=True
+    )
+    assert matrix.shape[0] == 1
+    assert list(matrix.data) == [1, 1, 1, 1]
+
+
+def test_bismark_read_no_cpg_overlap(tmp_path):
+    """Bismark read that doesn't overlap any CpG site → 0 rows."""
+    fasta_path = tmp_path / "ref_nocpg.fa"
+    # No CpG sites in first 50bp
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + "A" * 200 + "CG" + "A" * 48 + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_bismark_nocpg",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    xm = "." * 50
+    bam_path = tmp_path / "nocpg.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 250, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "A" * 50
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0  # Covers 0-49 (0-based), no CpG there
+        a.mapping_quality = 60
+        a.cigartuples = [(0, 50)]
+        a.set_tag("XM", xm)
+        out_bam.write(a)
+
+    pysam.index(str(bam_path))
+
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 0
+
+
 def test_extract_methylation_missing_index(tmp_path) -> None:
     """Test that missing BAM index file raises FileNotFoundError."""
     import shutil

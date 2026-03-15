@@ -113,6 +113,7 @@ xdoctest validates code examples in docstrings. Important rules:
 - Values: 1 (methylated), 0 (unmethylated), -1 (no data/indels/SNVs)
 
 ### Methylation Strand Detection
+- Bismark aligner: XM tag (Z/z for methylated/unmethylated CpG; no strand filtering needed)
 - Biscuit aligner: YD tag
 - bwameth aligner: YD tag (same format as Biscuit)
 - gem3/blueprint aligner: XB tag
