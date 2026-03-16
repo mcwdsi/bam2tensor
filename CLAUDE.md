@@ -23,8 +23,8 @@ nox --session=pre-commit
 # Run tests directly
 uv run pytest
 
-# Run tests with coverage
-uv run pytest --cov
+# Run tests with coverage (via nox)
+nox --session=tests
 
 # Format code
 uv run black src tests

@@ -13,14 +13,30 @@ delete the .rst file afterwards.
 
 ```{eval-rst}
 bam2tensor package
-=============================================================================
+==================
 
+
+bam2tensor.embedding module
+---------------------------
+
+.. automodule:: bam2tensor.embedding
+   :members:
+   :show-inheritance:
+   :undoc-members:
 
 bam2tensor.functions module
------------------------------------------------------------------------------
+---------------------------
 
 .. automodule:: bam2tensor.functions
    :members:
-   :undoc-members:
    :show-inheritance:
+   :undoc-members:
+
+bam2tensor.reference module
+---------------------------
+
+.. automodule:: bam2tensor.reference
+   :members:
+   :show-inheritance:
+   :undoc-members:
 ```

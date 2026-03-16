@@ -200,8 +200,8 @@ bam2tensor \
 ```
 Usage: bam2tensor [OPTIONS]
 
-  Extract read-level methylation data from an aligned .bam file and export
-  the data as a SciPy sparse matrix.
+  Extract read-level methylation data from an aligned bisulfite-seq or EM-seq
+  .bam file and export the data as a SciPy sparse matrix.
 
 Options:
   --version                       Show the version and exit.
@@ -209,19 +209,27 @@ Options:
                                   process.  [required]
   --genome-name TEXT              A custom string referring to your genome
                                   name, used to save a cache file (e.g. hg38,
-                                  hg38-no-alt, etc.).  [required]
+                                  hg39-no-alt, etc.).
   --expected-chromosomes TEXT     A comma-separated list of chromosomes to
                                   expect in the .fa genome. Defaults to hg38
-                                  chromosomes (chr1-chr22, chrX, chrY).
-  --reference-fasta PATH          Reference genome FASTA file (critical to
-                                  determine CpG sites).  [required]
+                                  chromosomes.
+  --reference-fasta FILE          Reference genome fasta file (critical to
+                                  determine CpG sites).
   --quality-limit INTEGER         Quality filter for aligned reads (default =
-                                  20).
+                                  20)
   --verbose                       Verbose output.
   --skip-cache                    De-novo generate CpG sites (slow).
   --debug                         Debug mode (extensive validity checking +
                                   debug messages).
   --overwrite                     Overwrite output file if it exists.
+  --output-dir DIRECTORY          Output directory for .methylation.npz files.
+                                  Defaults to same directory as the input BAM.
+  --download-reference [t2t-chm13|hg19|hg38|mm10]
+                                  Download and cache a known reference genome
+                                  (e.g. hg38, hg19, mm10, T2T-CHM13). Use
+                                  --list-genomes to see options.
+  --list-genomes                  List available reference genomes for
+                                  download and exit.
   --help                          Show this message and exit.
 ```
 

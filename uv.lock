@@ -62,7 +62,7 @@ wheels = [
 
 [[package]]
 name = "bam2tensor"
-version = "1.5"
+version = "2.0"
 source = { editable = "." }
 dependencies = [
     { name = "biopython" },
