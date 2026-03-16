@@ -352,12 +352,15 @@ def test_main_download_reference(runner: CliRunner, tmp_path) -> None:
                 "tests/test.bam",
                 "--download-reference",
                 "hg38",
+                "--expected-chromosomes",
+                "chr1",
+                "--skip-cache",
                 "--overwrite",
             ],
         )
 
-    # It should use hg38 as genome_name and set expected_chromosomes from KNOWN_GENOMES
-    assert result.exit_code == 0
+    # --download-reference sets genome_name to "hg38" automatically
+    assert result.exit_code == 0, f"Failed with: {result.output}"
     assert "hg38" in result.output
 
 
