@@ -841,3 +841,316 @@ def test_extract_methylation_missing_index(tmp_path) -> None:
             verbose=False,
             debug=False,
         )
+
+
+# ======================================================================
+# detect_aligner edge case tests
+# ======================================================================
+
+
+def test_detect_aligner_xb_tag(tmp_path):
+    """detect_aligner identifies gem3/Blueprint from XB tag."""
+    bam_path = tmp_path / "gem3.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 100, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "A" * 100
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, 100)]
+        a.set_tag("XB", "C")
+        out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    result = detect_aligner(str(bam_path))
+    assert "gem3" in result or "Blueprint" in result
+    assert "XB" in result
+
+
+def test_detect_aligner_cannot_open():
+    """detect_aligner returns Unknown when BAM cannot be opened."""
+    result = detect_aligner("/nonexistent/path/to/file.bam")
+    assert "Unknown" in result
+    assert "could not open" in result
+
+
+def test_detect_aligner_sample_size_limit(tmp_path):
+    """detect_aligner stops after sample_size reads."""
+    bam_path = tmp_path / "many_reads.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 100, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        for i in range(10):
+            a = pysam.AlignedSegment()
+            a.query_name = f"read{i}"
+            a.query_sequence = "A" * 100
+            a.flag = 0
+            a.reference_id = 0
+            a.reference_start = 0
+            a.mapping_quality = 60
+            a.cigartuples = [(0, 100)]
+            out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    result = detect_aligner(str(bam_path), sample_size=3)
+    assert "Unknown" in result
+    assert "no XM/YD/XB" in result
+
+
+def test_detect_aligner_skips_flagged_reads(tmp_path):
+    """detect_aligner skips reads with skip flags before checking tags."""
+    bam_path = tmp_path / "flagged.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 100, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        # Duplicate read with XM tag — should be skipped
+        a = pysam.AlignedSegment()
+        a.query_name = "dup_read"
+        a.query_sequence = "A" * 100
+        a.flag = 0x400  # duplicate
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, 100)]
+        a.set_tag("XM", "." * 100)
+        out_bam.write(a)
+        # Good read with YD tag
+        a2 = pysam.AlignedSegment()
+        a2.query_name = "good_read"
+        a2.query_sequence = "A" * 100
+        a2.flag = 0
+        a2.reference_id = 0
+        a2.reference_start = 0
+        a2.mapping_quality = 60
+        a2.cigartuples = [(0, 100)]
+        a2.set_tag("YD", "f")
+        out_bam.write(a2)
+    pysam.index(str(bam_path))
+
+    result = detect_aligner(str(bam_path))
+    assert "Biscuit" in result or "bwameth" in result
+
+
+# ======================================================================
+# Chromosome-not-in-BAM tests
+# ======================================================================
+
+
+def test_chromosome_not_in_bam_skipped(tmp_path):
+    """Chromosomes in embedding but not in BAM are skipped gracefully."""
+    fasta_path = tmp_path / "ref.fa"
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + "N" * 9 + "CG" + "N" * 139 + "\n")
+        f.write(">chr2\n" + "N" * 9 + "CG" + "N" * 139 + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_chrom_skip",
+        expected_chromosomes=["chr1", "chr2"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    # BAM only has chr1, not chr2
+    bam_path = tmp_path / "test.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 150, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "N" * 150
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, 150)]
+        a.set_tag("MD", "150")
+        a.set_tag("YD", "f")
+        out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=str(bam_path),
+        genome_methylation_embedding=emb,
+        verbose=True,
+    )
+    # Should still process chr1 reads
+    assert matrix.shape[0] == 1
+
+
+# ======================================================================
+# Biscuit/bwameth path: C and T base coverage
+# ======================================================================
+
+
+def test_biscuit_methylated_and_unmethylated_bases(tmp_path):
+    """Biscuit path: C at CpG = methylated (1), T at CpG = unmethylated (0)."""
+    fasta_path = tmp_path / "ref.fa"
+    # CpGs at 1-based positions 10, 21 (0-based C positions 9, 20)
+    seq = "N" * 9 + "CG" + "N" * 9 + "CG" + "N" * 128
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + seq + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_biscuit_ct",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    bam_path = tmp_path / "test.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": len(seq), "SN": "chr1"}]}
+    # Build a read with C at position 9 (methylated) and T at position 20 (unmethylated)
+    read_seq = list("N" * len(seq))
+    read_seq[9] = "C"  # methylated at CpG pos 10
+    read_seq[20] = "T"  # unmethylated at CpG pos 21
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "".join(read_seq)
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, len(seq))]
+        a.set_tag("MD", str(len(seq)))
+        a.set_tag("YD", "f")
+        out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=str(bam_path),
+        genome_methylation_embedding=emb,
+    )
+    assert matrix.shape[0] == 1
+    assert matrix.nnz == 2
+    data = list(matrix.data)
+    assert 1 in data  # methylated
+    assert 0 in data  # unmethylated
+
+
+def test_biscuit_debug_mode_ct_bases(tmp_path):
+    """Biscuit debug path prints methylation status for C and T bases."""
+    fasta_path = tmp_path / "ref.fa"
+    seq = "N" * 9 + "CG" + "N" * 9 + "CG" + "N" * 128
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + seq + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_biscuit_debug_ct",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    bam_path = tmp_path / "test.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": len(seq), "SN": "chr1"}]}
+    read_seq = list("N" * len(seq))
+    read_seq[9] = "C"
+    read_seq[20] = "T"
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "".join(read_seq)
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, len(seq))]
+        a.set_tag("MD", str(len(seq)))
+        a.set_tag("YD", "f")
+        out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=str(bam_path),
+        genome_methylation_embedding=emb,
+        debug=True,
+    )
+    assert matrix.shape[0] == 1
+
+
+# ======================================================================
+# XB tag (gem3/Blueprint) extraction tests
+# ======================================================================
+
+
+def test_xb_tag_forward_strand_extraction(tmp_path):
+    """gem3 XB=C tag on forward read processes correctly."""
+    emb, bam_path = _make_bam_with_reads(
+        tmp_path,
+        [
+            {
+                "name": "xb_forward",
+                "flag": 0,
+                "mapq": 60,
+                "tags": [("MD", "150"), ("XB", "C")],
+            },
+        ],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 1
+
+
+def test_xb_tag_reverse_strand_extraction(tmp_path):
+    """gem3 XB=G tag on reverse read processes correctly."""
+    emb, bam_path = _make_bam_with_reads(
+        tmp_path,
+        [
+            {
+                "name": "xb_reverse",
+                "flag": 0x10,  # reverse
+                "mapq": 60,
+                "tags": [("MD", "150"), ("XB", "G")],
+            },
+        ],
+    )
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 1
+
+
+# ======================================================================
+# Bismark edge cases for get_aligned_pairs filtering
+# ======================================================================
+
+
+def test_bismark_cpgs_in_range_but_no_aligned_pairs(tmp_path):
+    """Bismark read overlaps CpG range but get_aligned_pairs has no CpG matches."""
+    fasta_path = tmp_path / "ref.fa"
+    # CpG at position 51 (1-based), read covers positions 0-49
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + "A" * 50 + "CG" + "A" * 48 + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_bismark_no_pairs",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    # Read covers 0-99, CpG at pos 51 is within range.
+    # Use an insertion in CIGAR so aligned pairs skip the CpG position.
+    bam_path = tmp_path / "no_pairs.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 100, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "A" * 100
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        # 50M match + 50I insertion means reference_end=50, covering 0-49
+        # CpG at ref pos 50 (0-based) is NOT covered
+        a.cigartuples = [(0, 50), (1, 50)]
+        a.set_tag("XM", "." * 100)
+        out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    matrix = functions.extract_methylation_data_from_bam(
+        input_bam=str(bam_path), genome_methylation_embedding=emb
+    )
+    assert matrix.shape[0] == 0

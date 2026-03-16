@@ -55,7 +55,7 @@ tests = ["tests", "*/tests"]
 
 [tool.coverage.run]
 branch = true
-source = ["bam2tensor", "tests"]
+source = ["bam2tensor"]
 relative_files = true
 
 [tool.coverage.report]

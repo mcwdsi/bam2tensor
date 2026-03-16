@@ -265,3 +265,165 @@ def test_main_missing_reference_fasta(runner: CliRunner) -> None:
 
     assert result.exit_code != 0
     assert "reference-fasta" in result.output or "download-reference" in result.output
+
+
+def test_format_elapsed_minutes() -> None:
+    """Test _format_elapsed with durations over 60 seconds."""
+    result = __main__._format_elapsed(125.5)
+    assert "2 min" in result
+    assert "5.50 sec" in result
+
+
+def test_main_missing_genome_name(runner: CliRunner) -> None:
+    """Test that missing --genome-name without --download-reference gives error."""
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            "tests/test.bam",
+            "--reference-fasta",
+            "tests/test_fasta.fa",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "genome-name" in result.output
+
+
+def test_main_default_expected_chromosomes(runner: CliRunner) -> None:
+    """Test that omitting --expected-chromosomes uses hg38 defaults (24 chroms)."""
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            "tests/test.bam",
+            "--reference-fasta",
+            "tests/test_fasta.fa",
+            "--genome-name",
+            "test_default_chroms",
+            "--skip-cache",
+            "--overwrite",
+        ],
+    )
+
+    # The default hg38 chromosomes (24) are displayed in the config section
+    # before the embedding is loaded, even though the test FASTA only has 3 chroms.
+    assert "24 (" in result.output
+    assert "chrY" in result.output
+
+
+def test_main_few_chromosomes_display(runner: CliRunner) -> None:
+    """Test that <= 4 chromosomes are displayed directly (not summarized)."""
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            "tests/test.bam",
+            "--reference-fasta",
+            "tests/test_fasta.fa",
+            "--genome-name",
+            "test_few_chroms",
+            "--expected-chromosomes",
+            "chr1,chr2",
+            "--skip-cache",
+            "--overwrite",
+        ],
+    )
+
+    assert result.exit_code == 0
+    # With <= 4 chroms, they're shown directly as the comma-separated string
+    assert "chr1,chr2" in result.output
+
+
+def test_main_download_reference(runner: CliRunner, tmp_path) -> None:
+    """Test --download-reference flag triggers download and sets defaults."""
+    from unittest.mock import patch
+
+    # Mock download_reference to return a fake FASTA path
+    fake_fasta = tmp_path / "hg38.fa"
+    # Create a FASTA with chr1 so the embedding can be built
+    fake_fasta.write_text(">chr1\n" + "ACGTCGACGT" * 15 + "\n")
+
+    with patch("bam2tensor.__main__.download_reference_fn", return_value=fake_fasta):
+        result = runner.invoke(
+            __main__.main,
+            [
+                "--input-path",
+                "tests/test.bam",
+                "--download-reference",
+                "hg38",
+                "--overwrite",
+            ],
+        )
+
+    # It should use hg38 as genome_name and set expected_chromosomes from KNOWN_GENOMES
+    assert result.exit_code == 0
+    assert "hg38" in result.output
+
+
+def test_main_download_reference_with_genome_name(runner: CliRunner, tmp_path) -> None:
+    """Test --download-reference with explicit --genome-name and --expected-chromosomes."""
+    from unittest.mock import patch
+
+    fake_fasta = tmp_path / "hg38.fa"
+    fake_fasta.write_text(">chr1\n" + "ACGTCGACGT" * 15 + "\n")
+
+    with patch("bam2tensor.__main__.download_reference_fn", return_value=fake_fasta):
+        result = runner.invoke(
+            __main__.main,
+            [
+                "--input-path",
+                "tests/test.bam",
+                "--download-reference",
+                "hg38",
+                "--genome-name",
+                "custom_name",
+                "--expected-chromosomes",
+                "chr1",
+                "--skip-cache",
+                "--overwrite",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert "custom_name" in result.output
+
+
+def test_main_verbose_flag(runner: CliRunner) -> None:
+    """Test --verbose flag enables verbose output."""
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            "tests/test.bam",
+            "--overwrite",
+            "--reference-fasta",
+            "tests/test_fasta.fa",
+            "--genome-name",
+            "test",
+            "--expected-chromosomes",
+            "chr1,chr2,chr3",
+            "--verbose",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Total reads" in result.output
+
+
+def test_validate_input_output_unwritable_dir(tmp_path) -> None:
+    """Test validate_input_output raises ValueError for unwritable output dir."""
+    bam_file = tmp_path / "test.bam"
+    bam_file.touch()
+
+    unwritable_dir = tmp_path / "locked"
+    unwritable_dir.mkdir()
+    os.chmod(unwritable_dir, 0o444)
+
+    try:
+        with pytest.raises(ValueError, match="Output file path is not writable"):
+            __main__.validate_input_output(
+                [str(bam_file)], overwrite=False, output_dir=str(unwritable_dir)
+            )
+    finally:
+        os.chmod(unwritable_dir, 0o755)
