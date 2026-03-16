@@ -129,7 +129,6 @@ xdoctest validates code examples in docstrings. Important rules:
 ## CI/CD
 
 - GitHub Actions runs tests on Ubuntu and macOS with Python 3.12
-- SonarCloud integration for quality metrics
 - Automated docs deployment to GitHub Pages
 
 ## Common Tasks
