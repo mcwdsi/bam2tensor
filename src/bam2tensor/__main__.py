@@ -360,6 +360,7 @@ def main(
 
     # ── Header ──────────────────────────────────────────────────────────
     print(f"bam2tensor v{__version__}")
+    print("By Nick Semenkovich <semenko@alum.mit.edu>.")
     print("=" * 72)
 
     # ── Configuration ───────────────────────────────────────────────────

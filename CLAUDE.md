@@ -40,7 +40,7 @@ uv run mypy src
 
 ```
 src/bam2tensor/
-  __init__.py      # Package version (2.0)
+  __init__.py      # Package version (2.1)
   __main__.py      # Click CLI entry point
   embedding.py     # GenomeMethylationEmbedding class (FASTA parsing, CpG indexing)
   functions.py     # Core extraction: extract_methylation_data_from_bam()

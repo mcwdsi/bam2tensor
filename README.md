@@ -1,5 +1,7 @@
 # bam2tensor
 
+**Author:** [Nick Semenkovich](https://nick.semenkovich.com/) (semenko@alum.mit.edu)
+
 [![PyPI](https://img.shields.io/pypi/v/bam2tensor.svg)][pypi status]
 [![Status](https://img.shields.io/pypi/status/bam2tensor.svg)][pypi status]
 [![Python Version](https://img.shields.io/pypi/pyversions/bam2tensor)][pypi status]
@@ -510,7 +512,7 @@ If you encounter any problems, please [file an issue] with:
 
 ## Credits
 
-This project is developed and maintained by [Nick Semenkovich (@semenko)], as part of the Medical College of Wisconsin's [Data Science Institute].
+**Created and maintained by [Nick Semenkovich](https://nick.semenkovich.com/) ([@semenko](https://github.com/semenko))**, as part of the Medical College of Wisconsin's [Data Science Institute].
 
 This project was generated from [Statistics Norway]'s [SSB PyPI Template].
 
