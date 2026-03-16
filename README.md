@@ -5,11 +5,11 @@
 | Name                           |    Stmts |     Miss |   Branch |   BrPart |   Cover |   Missing |
 |------------------------------- | -------: | -------: | -------: | -------: | ------: | --------: |
 | src/bam2tensor/\_\_init\_\_.py |        1 |        0 |        0 |        0 |    100% |           |
-| src/bam2tensor/\_\_main\_\_.py |      153 |        2 |       60 |        2 |     98% |  337, 483 |
+| src/bam2tensor/\_\_main\_\_.py |      154 |        2 |       60 |        2 |     98% |  337, 484 |
 | src/bam2tensor/embedding.py    |       98 |        0 |       42 |        0 |    100% |           |
 | src/bam2tensor/functions.py    |      173 |        3 |       92 |        7 |     96% |318->320, 357, 366, 390->403, 416->430, 425->430, 489 |
 | src/bam2tensor/reference.py    |       63 |        0 |       16 |        0 |    100% |           |
-| **TOTAL**                      |  **488** |    **5** |  **210** |    **9** | **98%** |           |
+| **TOTAL**                      |  **489** |    **5** |  **210** |    **9** | **98%** |           |
 
 
 ## Setup coverage badge
