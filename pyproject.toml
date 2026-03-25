@@ -1,6 +1,6 @@
 [project]
 name = "bam2tensor"
-version = "2.2"
+version = "2.3"
 description = "Convert bisulfite-seq and EM-seq BAM files to sparse tensor representations of DNA methylation"
 authors = [{ name = "Nick Semenkovich", email = "semenko@alum.mit.edu" }]
 license = "MIT"
@@ -38,6 +38,7 @@ Changelog = "https://github.com/mcwdsi/bam2tensor/releases"
 
 [project.scripts]
 bam2tensor = "bam2tensor.__main__:main"
+bam2tensor-inspect = "bam2tensor.inspect:main"
 
 [dependency-groups]
 dev = [

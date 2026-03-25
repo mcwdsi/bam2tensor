@@ -40,8 +40,9 @@ uv run mypy src
 
 ```
 src/bam2tensor/
-  __init__.py      # Package version (2.2)
-  __main__.py      # Click CLI entry point
+  __init__.py      # Package version (2.3)
+  __main__.py      # Click CLI entry point (bam2tensor command)
+  inspect.py       # Inspect CLI entry point (bam2tensor-inspect command)
   embedding.py     # GenomeMethylationEmbedding class (FASTA parsing, CpG indexing)
   functions.py     # Core extraction: extract_methylation_data_from_bam()
   metadata.py      # .npz metadata read/write (provenance info in output files)
@@ -52,6 +53,7 @@ tests/
   test_functions.py   # Core function tests
   test_embedding.py   # Embedding class tests
   test_duplication.py  # Read duplication bug tests
+  test_inspect.py     # Inspect CLI tests
   test_metadata.py    # Metadata read/write/round-trip tests
   test_reference.py   # Reference download/caching tests
   test.bam, test.bam.bai, test_fasta.fa  # Test fixtures
@@ -147,6 +149,8 @@ xdoctest validates code examples in docstrings. Important rules:
 uv run bam2tensor --input-path input.bam --reference-fasta ref.fa
 # Or with auto-download:
 uv run bam2tensor --input-path input.bam --download-reference hg38
+# Inspect an output file:
+uv run bam2tensor-inspect output.methylation.npz
 ```
 
 ### Reference Genome Downloads

@@ -39,6 +39,7 @@
   - [Custom Output Directory](#custom-output-directory)
   - [Using a Custom Genome](#using-a-custom-genome)
   - [Command-Line Options](#command-line-options)
+- [Inspecting Output Files](#inspecting-output-files)
 - [Output Data Structure](#output-data-structure)
   - [Embedded Metadata](#embedded-metadata)
   - [Loading Output Files](#loading-output-files)
@@ -252,6 +253,31 @@ Options:
 | `--output-dir` | Write `.methylation.npz` files to this directory instead of next to the input BAMs. Created automatically if it doesn't exist. |
 | `--download-reference` | Download and cache a known reference genome. Choices: `hg38`, `hg19`, `mm10`, `T2T-CHM13`. Replaces `--reference-fasta`. |
 | `--list-genomes` | List available reference genomes for `--download-reference` and exit. |
+
+## Inspecting Output Files
+
+Use `bam2tensor-inspect` to view a summary of any `.methylation.npz` file without writing Python:
+
+```bash
+$ bam2tensor-inspect sample.methylation.npz
+sample.methylation.npz
+  Genome:          hg38
+  Chromosomes:     24 (chr1, chr2, ... chrX, chrY)
+  Reads:           1,423,891
+  CpG sites:       28,217,448
+  Data points:     12,847,322 (sparsity: 99.97%)
+  CpG index CRC32: a1b2c3d4
+  bam2tensor:      v2.3
+  File size:       14.2 MB
+```
+
+You can pass multiple files at once:
+
+```bash
+$ bam2tensor-inspect *.methylation.npz
+```
+
+This works on files produced by older versions of bam2tensor too (metadata fields will be omitted).
 
 ## Output Data Structure
 
