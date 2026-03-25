@@ -254,22 +254,24 @@ Options:
 
 ## Output Data Structure
 
-bam2tensor generates one `.npz` file per input BAM file. Each file contains a SciPy sparse [COO matrix] with the following structure:
+bam2tensor generates one `.methylation.npz` file per input BAM file. Each file contains a SciPy sparse [COO matrix] (`scipy.sparse.coo_matrix`) with the following structure:
 
 | Dimension | Represents |
 |-----------|------------|
-| Rows | Unique reads (primary alignments that pass quality filters) |
-| Columns | CpG sites (ordered by genomic position across all chromosomes) |
+| **Rows** | Unique sequencing reads (primary alignments that pass quality and flag filters, numbered sequentially as encountered across chromosomes) |
+| **Columns** | CpG sites from the reference genome, ordered by genomic position across all chromosomes (chr1, chr2, ..., chrX, chrY). Column `i` maps to the `i`-th CpG dinucleotide in the reference FASTA. |
+
+The **column dimension is determined entirely by the reference genome**: it equals the total number of CpG sites across all `--expected-chromosomes`. For example, hg38 with default chromosomes has ~28 million CpG columns. To map column indices back to genomic coordinates (e.g., column 12345 → chr1:29503), use the `GenomeMethylationEmbedding` class with the same reference FASTA and chromosome list (see [Working with Genomic Coordinates](#working-with-genomic-coordinates) below).
 
 ### Methylation State Values
 
 | Value | Meaning |
 |-------|---------|
-| `1` | Methylated (cytosine preserved as C) |
-| `0` | Unmethylated (cytosine converted to T by bisulfite treatment) |
-| `-1` | No data (indel, SNV, or site not covered by read) |
+| `1` | Methylated (cytosine preserved as C after bisulfite/enzymatic conversion) |
+| `0` | Unmethylated (cytosine converted to T by bisulfite/enzymatic treatment) |
+| `-1` | No data (indel, SNV, or other non-C/T base at a CpG position) |
 
-Note: Sparse matrices only store non-zero values. Positions with value `0` (unmethylated) are stored, but positions not covered by a read are simply absent from the matrix.
+Note: The matrix uses SciPy's COO sparse format, which explicitly stores all non-zero values. Unmethylated sites (value `0`) **are** stored as explicit entries. Positions not covered by a read are simply absent from the matrix (implicit zero, which is distinct from the explicit `0` = unmethylated).
 
 ### Loading Output Files
 
