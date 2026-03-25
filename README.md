@@ -40,6 +40,7 @@
   - [Using a Custom Genome](#using-a-custom-genome)
   - [Command-Line Options](#command-line-options)
 - [Output Data Structure](#output-data-structure)
+  - [Embedded Metadata](#embedded-metadata)
   - [Loading Output Files](#loading-output-files)
   - [Converting to Dense Arrays](#converting-to-dense-arrays)
   - [Working with Genomic Coordinates](#working-with-genomic-coordinates)
@@ -272,6 +273,36 @@ The **column dimension is determined entirely by the reference genome**: it equa
 | `-1` | No data (indel, SNV, or other non-C/T base at a CpG position) |
 
 Note: The matrix uses SciPy's COO sparse format, which explicitly stores all non-zero values. Unmethylated sites (value `0`) **are** stored as explicit entries. Positions not covered by a read are simply absent from the matrix (implicit zero, which is distinct from the explicit `0` = unmethylated).
+
+### Embedded Metadata
+
+Each `.methylation.npz` file includes a `metadata.json` entry inside the ZIP archive with provenance information:
+
+| Field | Description |
+|-------|-------------|
+| `bam2tensor_version` | Version of bam2tensor that produced the file |
+| `genome_name` | Genome identifier (e.g., `hg38`, `mm10`) |
+| `expected_chromosomes` | List of chromosomes included in the column mapping |
+| `total_cpg_sites` | Total number of CpG columns in the matrix |
+| `cpg_index_crc32` | CRC32 checksum of the CpG site positions (verifies identical column semantics) |
+
+This metadata is ignored by `scipy.sparse.load_npz`, so existing code continues to work. To read it:
+
+```python
+from bam2tensor.metadata import read_npz_metadata
+
+meta = read_npz_metadata("sample.methylation.npz")
+if meta is not None:
+    print(f"Genome: {meta['genome_name']}")
+    print(f"CpG sites: {meta['total_cpg_sites']:,}")
+    print(f"CpG index CRC32: {meta['cpg_index_crc32']}")
+```
+
+The `cpg_index_crc32` field uniquely identifies the column mapping. Two files with the same CRC32 have identical column semantics (same chromosomes, same CpG positions, same order) and their matrices can be directly stacked or compared. The metadata is also accessible without bam2tensor installed, since `.npz` files are ZIP archives:
+
+```bash
+unzip -p sample.methylation.npz metadata.json | python -m json.tool
+```
 
 ### Loading Output Files
 

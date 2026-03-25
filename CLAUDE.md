@@ -40,10 +40,11 @@ uv run mypy src
 
 ```
 src/bam2tensor/
-  __init__.py      # Package version (2.1)
+  __init__.py      # Package version (2.2)
   __main__.py      # Click CLI entry point
   embedding.py     # GenomeMethylationEmbedding class (FASTA parsing, CpG indexing)
   functions.py     # Core extraction: extract_methylation_data_from_bam()
+  metadata.py      # .npz metadata read/write (provenance info in output files)
   reference.py     # Reference genome download and caching utilities
 
 tests/
@@ -51,6 +52,7 @@ tests/
   test_functions.py   # Core function tests
   test_embedding.py   # Embedding class tests
   test_duplication.py  # Read duplication bug tests
+  test_metadata.py    # Metadata read/write/round-trip tests
   test_reference.py   # Reference download/caching tests
   test.bam, test.bam.bai, test_fasta.fa  # Test fixtures
 ```
@@ -110,8 +112,9 @@ xdoctest validates code examples in docstrings. Important rules:
 ### Data Structure
 - Output: scipy sparse COO matrix saved as .npz
 - Rows = unique reads (primary alignments)
-- Columns = CpG sites
+- Columns = CpG sites (ordered by genomic position, determined by reference genome)
 - Values: 1 (methylated), 0 (unmethylated), -1 (no data/indels/SNVs)
+- Each .npz file contains a `metadata.json` entry with provenance info (genome name, version, CpG index CRC32, expected chromosomes). Read via `bam2tensor.metadata.read_npz_metadata()`.
 
 ### Methylation Strand Detection
 - Bismark aligner: XM tag (Z/z for methylated/unmethylated CpG; no strand filtering needed)

@@ -38,6 +38,7 @@ from bam2tensor.functions import (
     detect_aligner,
     extract_methylation_data_from_bam,
 )
+from bam2tensor.metadata import compute_cpg_index_crc32, write_npz_metadata
 from bam2tensor.reference import (
     KNOWN_GENOMES,
     download_reference as download_reference_fn,
@@ -393,10 +394,12 @@ def main(
         verbose=verbose,
     )
     n_chroms = len(genome_methylation_embedding.cpg_sites_dict)
+    cpg_crc32 = compute_cpg_index_crc32(genome_methylation_embedding)
     print(
         f"  Total CpG sites: {genome_methylation_embedding.total_cpg_sites:,}"
         f" across {n_chroms} chromosome(s)"
     )
+    print(f"  CpG index CRC32: {cpg_crc32}")
     print(f"  Index loaded in {_format_elapsed(time.time() - time_start)}")
 
     # ── Discover BAM files ──────────────────────────────────────────────
@@ -460,6 +463,16 @@ def main(
 
         # Save
         scipy.sparse.save_npz(output_file, methylation_data_coo, compressed=True)
+        write_npz_metadata(
+            output_file,
+            {
+                "bam2tensor_version": __version__,
+                "genome_name": genome_name,
+                "expected_chromosomes": chrom_list,
+                "total_cpg_sites": genome_methylation_embedding.total_cpg_sites,
+                "cpg_index_crc32": cpg_crc32,
+            },
+        )
         print(f"  Output:        {output_file}")
         print(f"  Time:          {_format_elapsed(time.time() - time_bam)}")
 
