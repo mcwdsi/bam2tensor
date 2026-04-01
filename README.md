@@ -7,7 +7,7 @@
 | src/bam2tensor/\_\_init\_\_.py |        1 |        0 |        0 |        0 |    100% |           |
 | src/bam2tensor/\_\_main\_\_.py |      158 |        2 |       60 |        2 |     98% |  338, 497 |
 | src/bam2tensor/embedding.py    |       98 |        0 |       42 |        0 |    100% |           |
-| src/bam2tensor/functions.py    |      173 |        3 |       92 |        7 |     96% |318->320, 357, 366, 390->403, 416->430, 425->430, 489 |
+| src/bam2tensor/functions.py    |      173 |        3 |       92 |        7 |     96% |318-\>320, 357, 366, 390-\>403, 416-\>430, 425-\>430, 489 |
 | src/bam2tensor/inspect.py      |       55 |        4 |       24 |        1 |     94% |137-139, 143 |
 | src/bam2tensor/metadata.py     |       19 |        0 |        4 |        0 |    100% |           |
 | src/bam2tensor/reference.py    |       63 |        0 |       16 |        0 |    100% |           |
