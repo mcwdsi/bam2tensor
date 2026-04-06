@@ -38,7 +38,11 @@ from bam2tensor.functions import (
     detect_aligner,
     extract_methylation_data_from_bam,
 )
-from bam2tensor.metadata import compute_cpg_index_crc32, write_npz_metadata
+from bam2tensor.metadata import (
+    compute_cpg_index_crc32,
+    write_npz_metadata,
+    write_npz_tlen,
+)
 from bam2tensor.reference import (
     KNOWN_GENOMES,
     download_reference as download_reference_fn,
@@ -440,7 +444,7 @@ def main(
         # Extract
         print("  Extracting methylation data...")
         try:
-            methylation_data_coo = extract_methylation_data_from_bam(
+            extraction_result = extract_methylation_data_from_bam(
                 input_bam=input_bam,
                 genome_methylation_embedding=genome_methylation_embedding,
                 quality_limit=quality_limit,
@@ -453,16 +457,17 @@ def main(
             continue
 
         # Matrix stats
-        n_reads = methylation_data_coo.shape[0]
-        n_cpgs = methylation_data_coo.shape[1]
-        n_data = methylation_data_coo.nnz
+        n_reads = extraction_result.matrix.shape[0]
+        n_cpgs = extraction_result.matrix.shape[1]
+        n_data = extraction_result.matrix.nnz
         print(
             f"  Result:        {n_reads:,} reads x {n_cpgs:,} CpG sites"
             f" ({n_data:,} data points)"
         )
 
         # Save
-        scipy.sparse.save_npz(output_file, methylation_data_coo, compressed=True)
+        scipy.sparse.save_npz(output_file, extraction_result.matrix, compressed=True)
+        write_npz_tlen(output_file, extraction_result.tlen)
         write_npz_metadata(
             output_file,
             {

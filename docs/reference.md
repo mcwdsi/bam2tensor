@@ -32,6 +32,14 @@ bam2tensor.functions module
    :show-inheritance:
    :undoc-members:
 
+bam2tensor.metadata module
+--------------------------
+
+.. automodule:: bam2tensor.metadata
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 bam2tensor.reference module
 ---------------------------
 

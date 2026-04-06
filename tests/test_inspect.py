@@ -2,13 +2,14 @@
 
 import shutil
 
+import numpy as np
 import scipy.sparse
 from click.testing import CliRunner
 
 from bam2tensor import __main__
 from bam2tensor.inspect import _format_size
 from bam2tensor.inspect import main as inspect_main
-from bam2tensor.metadata import write_npz_metadata
+from bam2tensor.metadata import write_npz_metadata, write_npz_tlen
 
 
 def test_inspect_with_metadata(tmp_path) -> None:
@@ -19,7 +20,7 @@ def test_inspect_with_metadata(tmp_path) -> None:
     write_npz_metadata(
         npz_path,
         {
-            "bam2tensor_version": "2.3",
+            "bam2tensor_version": "2.4",
             "genome_name": "hg38",
             "expected_chromosomes": ["chr1", "chr2", "chrX", "chrY"],
             "total_cpg_sites": 5,
@@ -35,7 +36,7 @@ def test_inspect_with_metadata(tmp_path) -> None:
     assert "2" in result.output  # 2 reads
     assert "CpG sites:" in result.output
     assert "deadbeef" in result.output
-    assert "v2.3" in result.output
+    assert "v2.4" in result.output
     assert "chr1, chr2, chrX, chrY" in result.output
 
 
@@ -121,7 +122,7 @@ def test_inspect_end_to_end(tmp_path) -> None:
     assert result.exit_code == 0
     assert "test" in result.output  # genome_name
     assert "CpG index CRC32:" in result.output
-    assert "v2.3" in result.output
+    assert "v2.4" in result.output
 
 
 def test_format_size_bytes() -> None:
@@ -144,3 +145,42 @@ def test_format_size_gb() -> None:
     """_format_size handles gigabyte range."""
     result = _format_size(2_500_000_000)
     assert "GB" in result
+
+
+def test_inspect_with_tlen(tmp_path) -> None:
+    """Inspect prints fragment length stats when tlen.npy is present."""
+    npz_path = str(tmp_path / "sample.methylation.npz")
+    matrix = scipy.sparse.coo_matrix(([1, 0], ([0, 1], [0, 1])), shape=(2, 5))
+    scipy.sparse.save_npz(npz_path, matrix)
+    write_npz_tlen(npz_path, np.array([300, -300], dtype=np.int32))
+
+    runner = CliRunner()
+    result = runner.invoke(inspect_main, [npz_path])
+    assert result.exit_code == 0
+    assert "Fragment len:" in result.output
+    assert "median 300" in result.output
+
+
+def test_inspect_without_tlen(tmp_path) -> None:
+    """Inspect does not crash on files without tlen.npy (backward compat)."""
+    npz_path = str(tmp_path / "old.methylation.npz")
+    matrix = scipy.sparse.coo_matrix(([1], ([0], [0])), shape=(1, 100))
+    scipy.sparse.save_npz(npz_path, matrix)
+
+    runner = CliRunner()
+    result = runner.invoke(inspect_main, [npz_path])
+    assert result.exit_code == 0
+    assert "Fragment len:" not in result.output
+
+
+def test_inspect_tlen_all_zero(tmp_path) -> None:
+    """Inspect reports single-end when all TLEN values are zero."""
+    npz_path = str(tmp_path / "se.methylation.npz")
+    matrix = scipy.sparse.coo_matrix(([1], ([0], [0])), shape=(1, 10))
+    scipy.sparse.save_npz(npz_path, matrix)
+    write_npz_tlen(npz_path, np.array([0], dtype=np.int32))
+
+    runner = CliRunner()
+    result = runner.invoke(inspect_main, [npz_path])
+    assert result.exit_code == 0
+    assert "single-end" in result.output

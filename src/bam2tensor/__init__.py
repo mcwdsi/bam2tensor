@@ -30,14 +30,14 @@ Example:
         )
 
         # Extract methylation data
-        sparse_matrix = extract_methylation_data_from_bam(
+        result = extract_methylation_data_from_bam(
             input_bam="/path/to/sample.bam",
             genome_methylation_embedding=embedding,
         )
 
         # Save to file
         import scipy.sparse
-        scipy.sparse.save_npz("output.npz", sparse_matrix)
+        scipy.sparse.save_npz("output.npz", result.matrix)
 
 Output Format:
     The output is a SciPy sparse COO matrix where:
@@ -50,4 +50,4 @@ See Also:
     - https://mcwdsi.github.io/bam2tensor for full documentation
 """
 
-__version__ = "2.3"
+__version__ = "2.4"

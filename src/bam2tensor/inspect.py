@@ -21,7 +21,7 @@ import click
 import numpy as np
 import scipy.sparse
 
-from bam2tensor.metadata import read_npz_metadata
+from bam2tensor.metadata import read_npz_metadata, read_npz_tlen
 
 
 def _format_size(nbytes: int) -> str:
@@ -102,6 +102,19 @@ def inspect_npz(npz_path: str) -> None:
     print(f"  Reads:           {n_reads:,}")
     print(f"  CpG sites:       {n_cpgs:,}")
     print(f"  Data points:     {n_data:,} (sparsity: {sparsity:.2%})")
+
+    # TLEN / fragment length statistics
+    tlen = read_npz_tlen(npz_path)
+    if tlen is not None:
+        nonzero = np.abs(tlen)[np.abs(tlen) > 0]
+        if len(nonzero) > 0:
+            print(
+                f"  Fragment len:    median {np.median(nonzero):.0f}, "
+                f"mean {np.mean(nonzero):.0f}, "
+                f"range [{nonzero.min()}, {nonzero.max()}]"
+            )
+        else:
+            print("  Fragment len:    all zero (single-end data)")
 
     if meta and "cpg_index_crc32" in meta:
         print(f"  CpG index CRC32: {meta['cpg_index_crc32']}")

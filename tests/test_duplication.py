@@ -54,10 +54,12 @@ def test_duplication_bug(tmp_path):
     pysam.index(str(bam_path))
 
     # 4. Run extraction
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=str(bam_path), genome_methylation_embedding=emb, debug=True
     )
 
-    print(f"Matrix shape: {matrix.shape}")
+    print(f"Matrix shape: {result.matrix.shape}")
     # We expect exactly 1 row because there is only 1 read
-    assert matrix.shape[0] == 1, f"Expected 1 row (read), got {matrix.shape[0]}"
+    assert (
+        result.matrix.shape[0] == 1
+    ), f"Expected 1 row (read), got {result.matrix.shape[0]}"

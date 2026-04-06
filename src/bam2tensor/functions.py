@@ -39,21 +39,41 @@ Example:
     ... )
     >>>
     >>> # Extract methylation data
-    >>> matrix = extract_methylation_data_from_bam(
+    >>> result = extract_methylation_data_from_bam(
     ...     input_bam="sample.bam",
     ...     genome_methylation_embedding=embedding,
     ...     quality_limit=20,
     ... )
     >>>
-    >>> print(f"Extracted {matrix.shape[0]} reads, {matrix.nnz} data points")
+    >>> print(f"Extracted {result.matrix.shape[0]} reads, {result.matrix.nnz} data points")
 """
 
+from typing import NamedTuple
+
+import numpy as np
 import scipy.sparse
 import pysam
 import bisect
 
 from tqdm import tqdm
 from bam2tensor.embedding import GenomeMethylationEmbedding
+
+
+class ExtractionResult(NamedTuple):
+    """Result of methylation extraction from a BAM file.
+
+    Attributes:
+        matrix: Sparse COO matrix of shape (n_reads, n_cpg_sites) with
+            methylation states: 1 (methylated), 0 (unmethylated), -1
+            (no data).
+        tlen: 1-D numpy array of shape (n_reads,) containing the signed
+            template length (TLEN from BAM) for each read. 0 for
+            single-end reads or reads with unmapped mates.
+    """
+
+    matrix: scipy.sparse.coo_matrix
+    tlen: np.ndarray
+
 
 # BAM flag bits for reads to skip: duplicate (0x400), qcfail (0x200),
 # secondary (0x100), supplementary (0x800).
@@ -180,7 +200,7 @@ def extract_methylation_data_from_bam(
     quality_limit: int = 20,
     verbose: bool = False,
     debug: bool = False,
-) -> scipy.sparse.coo_matrix:
+) -> ExtractionResult:
     """Extract read-level CpG methylation data from a BAM file.
 
     Parses a bisulfite-sequencing or EM-seq BAM file and extracts methylation
@@ -225,14 +245,19 @@ def extract_methylation_data_from_bam(
             only processed once. Significantly slower.
 
     Returns:
-        A scipy.sparse.coo_matrix with shape (n_reads, n_cpg_sites) where:
-            - n_reads is the number of reads that passed filters and covered
-              at least one CpG site
-            - n_cpg_sites is genome_methylation_embedding.total_cpg_sites
-            - Values are: 1 (methylated), 0 (unmethylated), -1 (no data)
+        An ExtractionResult named tuple with two fields:
 
-        The matrix uses COO format for efficient construction. Convert to
-        CSR (tocsr()) for row slicing or CSC (tocsc()) for column slicing.
+        - **matrix**: A scipy.sparse.coo_matrix with shape
+          (n_reads, n_cpg_sites) where n_reads is the number of reads
+          that passed filters and covered at least one CpG site,
+          n_cpg_sites is genome_methylation_embedding.total_cpg_sites,
+          and values are: 1 (methylated), 0 (unmethylated), -1 (no data).
+          The matrix uses COO format for efficient construction; convert
+          to CSR (tocsr()) for row slicing or CSC (tocsc()) for column
+          slicing.
+        - **tlen**: A 1-D numpy int32 array of shape (n_reads,) containing
+          the signed template length (BAM TLEN field) for each read.
+          Values are 0 for single-end reads or reads with unmapped mates.
 
     Raises:
         FileNotFoundError: If the BAM file index (.bam.bai) is missing.
@@ -252,7 +277,7 @@ def extract_methylation_data_from_bam(
         ... )
         >>>
         >>> # Extract methylation data
-        >>> matrix = extract_methylation_data_from_bam(
+        >>> result = extract_methylation_data_from_bam(
         ...     input_bam="sample.bam",
         ...     genome_methylation_embedding=embedding,
         ...     quality_limit=30,  # Stricter quality filter
@@ -260,12 +285,12 @@ def extract_methylation_data_from_bam(
         ... )
         >>>
         >>> # Analyze results
-        >>> print(f"Reads with CpG data: {matrix.shape[0]:,}")
-        >>> print(f"Total CpG sites: {matrix.shape[1]:,}")
-        >>> print(f"Data points: {matrix.nnz:,}")
+        >>> print(f"Reads with CpG data: {result.matrix.shape[0]:,}")
+        >>> print(f"Total CpG sites: {result.matrix.shape[1]:,}")
+        >>> print(f"Data points: {result.matrix.nnz:,}")
         >>>
         >>> # Save to file
-        >>> scipy.sparse.save_npz("sample.methylation.npz", matrix)
+        >>> scipy.sparse.save_npz("sample.methylation.npz", result.matrix)
 
     Note:
         The function processes chromosomes in the order they appear in
@@ -304,6 +329,7 @@ def extract_methylation_data_from_bam(
     coo_row = []  # Read number
     coo_col = []  # CpG number (embedding)
     coo_data = []  # Methylation state
+    tlen_list: list[int] = []  # Template length (TLEN) per read
 
     # This is slow, but we only run it once and store the results for later
     for chrom, cpg_sites in tqdm(
@@ -398,6 +424,7 @@ def extract_methylation_data_from_bam(
                         ), "Read seen twice!"
                         debug_read_name_to_row_number[read_key] = read_number
                         print("************************************************\n")
+                    tlen_list.append(aligned_segment.template_length)
                     read_number += 1
 
                 continue  # Skip the Biscuit/bwameth/gem3 path below
@@ -526,6 +553,7 @@ def extract_methylation_data_from_bam(
                             f"\t{query_pos} {ref_pos} C->{query_base} [Unknown! SNV? Indel?]"
                         )
 
+            tlen_list.append(aligned_segment.template_length)
             read_number += 1
 
             if debug:
@@ -557,6 +585,6 @@ def extract_methylation_data_from_bam(
     #   Number of columns = number of CpG sites
     assert sparse_matrix.shape[1] == genome_methylation_embedding.total_cpg_sites
 
-    return sparse_matrix
+    tlen_array = np.array(tlen_list, dtype=np.int32)
 
-    # return scipy.sparse.coo_matrix((coo_data, (coo_row, coo_col)), shape=(len(read_name_to_row_number) + 1, total_cpg_sites))
+    return ExtractionResult(matrix=sparse_matrix, tlen=tlen_array)

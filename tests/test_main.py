@@ -7,6 +7,7 @@ from click.testing import CliRunner
 
 from bam2tensor import __main__
 from bam2tensor.__main__ import get_output_path
+from bam2tensor.metadata import read_npz_tlen
 
 
 @pytest.fixture
@@ -430,3 +431,35 @@ def test_validate_input_output_unwritable_dir(tmp_path) -> None:
             )
     finally:
         os.chmod(unwritable_dir, 0o755)
+
+
+def test_main_writes_tlen(runner: CliRunner, tmp_path) -> None:
+    """Test that the CLI writes TLEN data to the output .npz file."""
+    shutil.copy("tests/test.bam", tmp_path / "test.bam")
+    shutil.copy("tests/test.bam.bai", tmp_path / "test.bam.bai")
+
+    output_dir = tmp_path / "output"
+
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            str(tmp_path / "test.bam"),
+            "--reference-fasta",
+            "tests/test_fasta.fa",
+            "--genome-name",
+            "test",
+            "--expected-chromosomes",
+            "chr1,chr2,chr3",
+            "--output-dir",
+            str(output_dir),
+            "--overwrite",
+        ],
+    )
+
+    assert result.exit_code == 0, f"Failed with: {result.output}"
+
+    npz_path = str(output_dir / "test.methylation.npz")
+    tlen = read_npz_tlen(npz_path)
+    assert tlen is not None
+    assert len(tlen) >= 1  # At least one read

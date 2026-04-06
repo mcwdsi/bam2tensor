@@ -27,9 +27,12 @@ Example:
         hg38
 """
 
+import io
 import json
 import zipfile
 import zlib
+
+import numpy as np
 
 from bam2tensor.embedding import GenomeMethylationEmbedding
 
@@ -111,4 +114,49 @@ def read_npz_metadata(npz_path: str) -> dict | None:
     with zipfile.ZipFile(npz_path, "r") as zf:
         if "metadata.json" in zf.namelist():
             return json.loads(zf.read("metadata.json"))
+    return None
+
+
+def write_npz_tlen(npz_path: str, tlen: np.ndarray) -> None:
+    """Append a ``tlen.npy`` entry to an existing ``.npz`` file.
+
+    The array is serialised with :func:`numpy.save` and appended to the
+    ZIP archive.  ``scipy.sparse.load_npz`` ignores this extra entry, so
+    the file remains compatible with existing sparse-matrix code.
+
+    Args:
+        npz_path: Path to the ``.npz`` file (must already exist).
+        tlen: A 1-D numpy array of per-read template lengths.
+
+    Example:
+        >>> # xdoctest: +SKIP
+        >>> write_npz_tlen("out.npz", np.array([300, -300, 0], dtype=np.int32))
+    """
+    buf = io.BytesIO()
+    np.save(buf, tlen)
+    with zipfile.ZipFile(npz_path, "a") as zf:
+        zf.writestr("tlen.npy", buf.getvalue())
+
+
+def read_npz_tlen(npz_path: str) -> np.ndarray | None:
+    """Read the ``tlen.npy`` entry from a ``.npz`` file.
+
+    Args:
+        npz_path: Path to the ``.npz`` file.
+
+    Returns:
+        The per-read template-length array, or ``None`` if the file does
+        not contain a ``tlen.npy`` entry (e.g. files produced by older
+        versions).
+
+    Example:
+        >>> # xdoctest: +SKIP
+        >>> tlen = read_npz_tlen("sample.methylation.npz")
+        >>> if tlen is not None:
+        ...     print(f"Median fragment length: {np.median(np.abs(tlen)):.0f}")
+    """
+    with zipfile.ZipFile(npz_path, "r") as zf:
+        if "tlen.npy" in zf.namelist():
+            buf = io.BytesIO(zf.read("tlen.npy"))
+            return np.load(buf, allow_pickle=False)
     return None

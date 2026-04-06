@@ -40,7 +40,7 @@ uv run mypy src
 
 ```
 src/bam2tensor/
-  __init__.py      # Package version (2.3)
+  __init__.py      # Package version (2.4)
   __main__.py      # Click CLI entry point (bam2tensor command)
   inspect.py       # Inspect CLI entry point (bam2tensor-inspect command)
   embedding.py     # GenomeMethylationEmbedding class (FASTA parsing, CpG indexing)
@@ -117,6 +117,8 @@ xdoctest validates code examples in docstrings. Important rules:
 - Columns = CpG sites (ordered by genomic position, determined by reference genome)
 - Values: 1 (methylated), 0 (unmethylated), -1 (no data/indels/SNVs)
 - Each .npz file contains a `metadata.json` entry with provenance info (genome name, version, CpG index CRC32, expected chromosomes). Read via `bam2tensor.metadata.read_npz_metadata()`.
+- Each .npz file contains a `tlen.npy` entry with per-read signed template length (BAM TLEN field) as int32. Read via `bam2tensor.metadata.read_npz_tlen()`. Returns `None` for files from older versions.
+- `extract_methylation_data_from_bam()` returns an `ExtractionResult` NamedTuple with `.matrix` (sparse COO) and `.tlen` (numpy int32 array).
 
 ### Methylation Strand Detection
 - Bismark aligner: XM tag (Z/z for methylated/unmethylated CpG; no strand filtering needed)

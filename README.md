@@ -41,6 +41,7 @@
   - [Command-Line Options](#command-line-options)
 - [Inspecting Output Files](#inspecting-output-files)
 - [Output Data Structure](#output-data-structure)
+  - [Per-Read Fragment Length (TLEN)](#per-read-fragment-length-tlen)
   - [Embedded Metadata](#embedded-metadata)
   - [Loading Output Files](#loading-output-files)
   - [Converting to Dense Arrays](#converting-to-dense-arrays)
@@ -64,6 +65,7 @@
 - **Batch Processing**: Process multiple BAM files with directory recursion
 - **Caching**: CpG site indexing is cached to accelerate repeated runs on the same genome
 - **Quality Filtering**: Configurable mapping quality thresholds
+- **Per-Read Fragment Length**: Stores BAM TLEN (template length) alongside the methylation tensor for joint fragment-methylation analysis
 
 ## Requirements
 
@@ -266,8 +268,9 @@ sample.methylation.npz
   Reads:           1,423,891
   CpG sites:       28,217,448
   Data points:     12,847,322 (sparsity: 99.97%)
+  Fragment len:    median 167, mean 182, range [50, 600]
   CpG index CRC32: a1b2c3d4
-  bam2tensor:      v2.3
+  bam2tensor:      v2.4
   File size:       14.2 MB
 ```
 
@@ -299,6 +302,27 @@ The **column dimension is determined entirely by the reference genome**: it equa
 | `-1` | No data (indel, SNV, or other non-C/T base at a CpG position) |
 
 Note: The matrix uses SciPy's COO sparse format, which explicitly stores all non-zero values. Unmethylated sites (value `0`) **are** stored as explicit entries. Positions not covered by a read are simply absent from the matrix (implicit zero, which is distinct from the explicit `0` = unmethylated).
+
+### Per-Read Fragment Length (TLEN)
+
+Each `.methylation.npz` file includes a `tlen.npy` entry inside the ZIP archive containing the signed BAM template length (TLEN) for every read in the matrix. This enables joint fragment-length and methylation analysis without re-processing the BAM.
+
+- One `int32` value per read (row), in the same order as the sparse matrix rows
+- Signed: positive for the leftmost read in a pair, negative for the rightmost
+- Zero for single-end reads or reads with unmapped mates
+- Use `abs(tlen)` to get fragment lengths
+
+```python
+from bam2tensor.metadata import read_npz_tlen
+import numpy as np
+
+tlen = read_npz_tlen("sample.methylation.npz")
+if tlen is not None:
+    frag_lengths = np.abs(tlen)
+    nonzero = frag_lengths[frag_lengths > 0]
+    print(f"Median fragment length: {np.median(nonzero):.0f}")
+    print(f"Mean fragment length: {np.mean(nonzero):.0f}")
+```
 
 ### Embedded Metadata
 
@@ -515,10 +539,22 @@ extract_methylation_data_from_bam(
     quality_limit: int = 20,                           # Minimum MAPQ
     verbose: bool = False,                             # Enable verbose output
     debug: bool = False                                # Enable debug output
-) -> scipy.sparse.coo_matrix
+) -> ExtractionResult
 ```
 
-**Returns:** A SciPy COO sparse matrix with shape (n_reads, n_cpg_sites).
+**Returns:** An `ExtractionResult` named tuple with two fields:
+- `matrix`: A SciPy COO sparse matrix with shape (n_reads, n_cpg_sites)
+- `tlen`: A 1-D numpy `int32` array of shape (n_reads,) containing the signed template length (BAM TLEN field) for each read
+
+### `bam2tensor.metadata.read_npz_tlen`
+
+Read per-read template lengths from a `.methylation.npz` file.
+
+```python
+read_npz_tlen(npz_path: str) -> np.ndarray | None
+```
+
+**Returns:** The per-read template-length array, or `None` if the file was produced by an older version of bam2tensor.
 
 ## Contributing
 

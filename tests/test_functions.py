@@ -1,8 +1,9 @@
+import numpy as np
 import pysam
 import pytest
 from bam2tensor import embedding
 from bam2tensor import functions
-from bam2tensor.functions import check_chromosome_overlap
+from bam2tensor.functions import ExtractionResult, check_chromosome_overlap
 from bam2tensor.functions import detect_aligner
 
 TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
@@ -18,7 +19,7 @@ TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
 def test_extract_methylation_data_from_bam() -> None:
     """Test extract_methylation_data_from_bam."""
 
-    test_coo_matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam="tests/test.bam",
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
@@ -26,14 +27,17 @@ def test_extract_methylation_data_from_bam() -> None:
         debug=False,
     )
 
+    assert isinstance(result, ExtractionResult)
     # Need to make a better test bam & fa pair...
-    assert test_coo_matrix.shape == (1, 37489)
+    assert result.matrix.shape == (1, 37489)
+    assert len(result.tlen) == result.matrix.shape[0]
+    assert result.tlen.dtype == np.int32
 
 
 def test_extract_methylation_data_from_bam_debug() -> None:
     """Test extract_methylation_data_from_bam with debug flag set."""
 
-    test_coo_matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam="tests/test.bam",
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
@@ -41,7 +45,8 @@ def test_extract_methylation_data_from_bam_debug() -> None:
         debug=True,
     )
 
-    assert test_coo_matrix.shape == (1, 37489)
+    assert result.matrix.shape == (1, 37489)
+    assert len(result.tlen) == 1
 
 
 def test_check_chromosome_overlap_matching() -> None:
@@ -197,10 +202,10 @@ def test_duplicate_reads_skipped(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_qcfail_reads_skipped(tmp_path):
@@ -216,10 +221,10 @@ def test_qcfail_reads_skipped(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_secondary_reads_skipped(tmp_path):
@@ -235,10 +240,10 @@ def test_secondary_reads_skipped(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_supplementary_reads_skipped(tmp_path):
@@ -254,10 +259,10 @@ def test_supplementary_reads_skipped(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_combined_skip_flags(tmp_path):
@@ -273,10 +278,10 @@ def test_combined_skip_flags(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_normal_read_not_skipped(tmp_path):
@@ -292,10 +297,10 @@ def test_normal_read_not_skipped(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
 
 
 def test_paired_read_flag_not_skipped(tmp_path):
@@ -311,10 +316,10 @@ def test_paired_read_flag_not_skipped(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
 
 
 # ======================================================================
@@ -335,10 +340,10 @@ def test_daughter_strand_skipped_yd(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_parent_strand_kept_yd_reverse(tmp_path):
@@ -354,10 +359,10 @@ def test_parent_strand_kept_yd_reverse(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
 
 
 def test_daughter_strand_skipped_xb(tmp_path):
@@ -373,10 +378,10 @@ def test_daughter_strand_skipped_xb(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_parent_strand_kept_xb_forward(tmp_path):
@@ -392,10 +397,10 @@ def test_parent_strand_kept_xb_forward(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
 
 
 def test_no_strand_tag_skipped(tmp_path):
@@ -411,11 +416,11 @@ def test_no_strand_tag_skipped(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
     # bisulfite_parent_strand_is_reverse=None != is_reverse=False, so skipped
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_low_mapq_skipped_before_strand_check(tmp_path):
@@ -431,10 +436,10 @@ def test_low_mapq_skipped_before_strand_check(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_mixed_reads_correct_count(tmp_path):
@@ -486,10 +491,10 @@ def test_mixed_reads_correct_count(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 2  # only good1 and good2
+    assert result.matrix.shape[0] == 2  # only good1 and good2
 
 
 def test_skip_flags_constant():
@@ -581,13 +586,13 @@ def test_bismark_methylated_cpgs(tmp_path):
         tmp_path,
         [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
     # All 4 CpG sites should be methylated (value=1)
-    assert matrix.nnz == 4
-    assert list(matrix.data) == [1, 1, 1, 1]
+    assert result.matrix.nnz == 4
+    assert list(result.matrix.data) == [1, 1, 1, 1]
 
 
 def test_bismark_unmethylated_cpgs(tmp_path):
@@ -597,14 +602,14 @@ def test_bismark_unmethylated_cpgs(tmp_path):
         tmp_path,
         [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
     # Unmethylated is stored as 0 in COO — but COO doesn't store literal zeros by default.
     # scipy COO *does* store explicit zeros; they are in .data.
-    assert matrix.nnz == 4
-    assert list(matrix.data) == [0, 0, 0, 0]
+    assert result.matrix.nnz == 4
+    assert list(result.matrix.data) == [0, 0, 0, 0]
 
 
 def test_bismark_mixed_methylation(tmp_path):
@@ -614,12 +619,12 @@ def test_bismark_mixed_methylation(tmp_path):
         tmp_path,
         [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
-    assert matrix.nnz == 4
-    assert list(matrix.data) == [1, 0, 1, 0]
+    assert result.matrix.shape[0] == 1
+    assert result.matrix.nnz == 4
+    assert list(result.matrix.data) == [1, 0, 1, 0]
 
 
 def test_bismark_no_cpg_in_xm(tmp_path):
@@ -629,14 +634,14 @@ def test_bismark_no_cpg_in_xm(tmp_path):
         tmp_path,
         [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
     # Dots at CpG positions → -1 values, but the read should still be counted
     # if any CpG data was recorded
     # Actually: '.' is non-CpG context → gets -1 at CpG reference positions
-    assert matrix.shape[0] == 1
-    assert all(v == -1 for v in matrix.data)
+    assert result.matrix.shape[0] == 1
+    assert all(v == -1 for v in result.matrix.data)
 
 
 def test_bismark_non_cpg_context_at_cpg_site(tmp_path):
@@ -647,11 +652,11 @@ def test_bismark_non_cpg_context_at_cpg_site(tmp_path):
         tmp_path,
         [{"name": "read1", "flag": 0, "mapq": 60, "xm_string": xm}],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
-    assert all(v == -1 for v in matrix.data)
+    assert result.matrix.shape[0] == 1
+    assert all(v == -1 for v in result.matrix.data)
 
 
 def test_bismark_duplicate_flag_skipped(tmp_path):
@@ -661,10 +666,10 @@ def test_bismark_duplicate_flag_skipped(tmp_path):
         tmp_path,
         [{"name": "dup", "flag": 0x400, "mapq": 60, "xm_string": xm}],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_bismark_low_mapq_skipped(tmp_path):
@@ -674,10 +679,10 @@ def test_bismark_low_mapq_skipped(tmp_path):
         tmp_path,
         [{"name": "lowq", "flag": 0, "mapq": 5, "xm_string": xm}],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_bismark_both_strands_processed(tmp_path):
@@ -692,11 +697,11 @@ def test_bismark_both_strands_processed(tmp_path):
             {"name": "rev", "flag": 0x10, "mapq": 60, "xm_string": xm},
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
     # Both reads should be processed (no daughter-strand filtering for Bismark)
-    assert matrix.shape[0] == 2
+    assert result.matrix.shape[0] == 2
 
 
 def test_bismark_xm_takes_priority_over_yd(tmp_path):
@@ -716,12 +721,12 @@ def test_bismark_xm_takes_priority_over_yd(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
     # XM path should process it (not skip as daughter strand)
-    assert matrix.shape[0] == 1
-    assert all(v == 1 for v in matrix.data)
+    assert result.matrix.shape[0] == 1
+    assert all(v == 1 for v in result.matrix.data)
 
 
 def test_bismark_debug_mode(tmp_path):
@@ -731,11 +736,11 @@ def test_bismark_debug_mode(tmp_path):
         tmp_path,
         [{"name": "debug_read", "flag": 0, "mapq": 60, "xm_string": xm}],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb, debug=True
     )
-    assert matrix.shape[0] == 1
-    assert list(matrix.data) == [1, 1, 1, 1]
+    assert result.matrix.shape[0] == 1
+    assert list(result.matrix.data) == [1, 1, 1, 1]
 
 
 def test_bismark_read_no_cpg_overlap(tmp_path):
@@ -769,10 +774,10 @@ def test_bismark_read_no_cpg_overlap(tmp_path):
 
     pysam.index(str(bam_path))
 
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=str(bam_path), genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
 
 
 def test_detect_aligner_yd_tag():
@@ -968,13 +973,13 @@ def test_chromosome_not_in_bam_skipped(tmp_path):
         out_bam.write(a)
     pysam.index(str(bam_path))
 
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=str(bam_path),
         genome_methylation_embedding=emb,
         verbose=True,
     )
     # Should still process chr1 reads
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
 
 
 # ======================================================================
@@ -1017,13 +1022,13 @@ def test_biscuit_methylated_and_unmethylated_bases(tmp_path):
         out_bam.write(a)
     pysam.index(str(bam_path))
 
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=str(bam_path),
         genome_methylation_embedding=emb,
     )
-    assert matrix.shape[0] == 1
-    assert matrix.nnz == 2
-    data = list(matrix.data)
+    assert result.matrix.shape[0] == 1
+    assert result.matrix.nnz == 2
+    data = list(result.matrix.data)
     assert 1 in data  # methylated
     assert 0 in data  # unmethylated
 
@@ -1061,12 +1066,12 @@ def test_biscuit_debug_mode_ct_bases(tmp_path):
         out_bam.write(a)
     pysam.index(str(bam_path))
 
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=str(bam_path),
         genome_methylation_embedding=emb,
         debug=True,
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
 
 
 # ======================================================================
@@ -1087,10 +1092,10 @@ def test_xb_tag_forward_strand_extraction(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
 
 
 def test_xb_tag_reverse_strand_extraction(tmp_path):
@@ -1106,10 +1111,10 @@ def test_xb_tag_reverse_strand_extraction(tmp_path):
             },
         ],
     )
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 1
+    assert result.matrix.shape[0] == 1
 
 
 # ======================================================================
@@ -1150,7 +1155,156 @@ def test_bismark_cpgs_in_range_but_no_aligned_pairs(tmp_path):
         out_bam.write(a)
     pysam.index(str(bam_path))
 
-    matrix = functions.extract_methylation_data_from_bam(
+    result = functions.extract_methylation_data_from_bam(
         input_bam=str(bam_path), genome_methylation_embedding=emb
     )
-    assert matrix.shape[0] == 0
+    assert result.matrix.shape[0] == 0
+
+
+# ======================================================================
+# TLEN (template length) tests
+# ======================================================================
+
+
+def test_tlen_shape_matches_reads(tmp_path):
+    """TLEN array length matches the number of rows in the matrix."""
+    emb, bam_path = _make_bam_with_reads(
+        tmp_path,
+        [
+            {
+                "name": "read1",
+                "flag": 0,
+                "mapq": 60,
+                "tags": [("MD", "150"), ("YD", "f")],
+            },
+        ],
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert len(result.tlen) == result.matrix.shape[0]
+
+
+def test_tlen_dtype_is_int32(tmp_path):
+    """TLEN array dtype is int32."""
+    emb, bam_path = _make_bam_with_reads(
+        tmp_path,
+        [
+            {
+                "name": "read1",
+                "flag": 0,
+                "mapq": 60,
+                "tags": [("MD", "150"), ("YD", "f")],
+            },
+        ],
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert result.tlen.dtype == np.int32
+
+
+def test_tlen_with_template_length(tmp_path):
+    """TLEN captures the template_length set on the aligned segment."""
+    fasta_path = tmp_path / "ref.fa"
+    seq = "N" * 9 + "CG" + "N" * 9 + "CG" + "N" * 79 + "CG" + "N" * 9 + "CG" + "N" * 40
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + seq + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_tlen",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    bam_path = tmp_path / "test.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 150, "SN": "chr1"}]}
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "read1"
+        a.query_sequence = "N" * 150
+        a.flag = 0x1 | 0x2  # paired, proper pair
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, 150)]
+        a.template_length = 300
+        a.set_tag("MD", "150")
+        a.set_tag("YD", "f")
+        out_bam.write(a)
+
+    pysam.index(str(bam_path))
+
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=str(bam_path), genome_methylation_embedding=emb
+    )
+    assert result.matrix.shape[0] == 1
+    assert result.tlen[0] == 300
+
+
+def test_tlen_zero_for_single_end(tmp_path):
+    """TLEN is 0 for single-end reads (default template_length)."""
+    emb, bam_path = _make_bam_with_reads(
+        tmp_path,
+        [
+            {
+                "name": "se_read",
+                "flag": 0,  # single-end
+                "mapq": 60,
+                "tags": [("MD", "150"), ("YD", "f")],
+            },
+        ],
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert result.matrix.shape[0] == 1
+    assert result.tlen[0] == 0
+
+
+def test_tlen_excluded_for_filtered_reads(tmp_path):
+    """Filtered reads (dup, qcfail, etc.) are not included in TLEN array."""
+    emb, bam_path = _make_bam_with_reads(
+        tmp_path,
+        [
+            {
+                "name": "good_read",
+                "flag": 0,
+                "mapq": 60,
+                "tags": [("MD", "150"), ("YD", "f")],
+            },
+            {
+                "name": "dup_read",
+                "flag": 0x400,  # duplicate — should be filtered
+                "mapq": 60,
+                "tags": [("MD", "150"), ("YD", "f")],
+            },
+        ],
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert result.matrix.shape[0] == 1
+    assert len(result.tlen) == 1
+
+
+def test_tlen_empty_for_no_reads(tmp_path):
+    """TLEN array is empty when no reads pass filters."""
+    emb, bam_path = _make_bam_with_reads(
+        tmp_path,
+        [
+            {
+                "name": "dup_read",
+                "flag": 0x400,
+                "mapq": 60,
+                "tags": [("MD", "150"), ("YD", "f")],
+            },
+        ],
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert result.matrix.shape[0] == 0
+    assert len(result.tlen) == 0
+    assert result.tlen.dtype == np.int32
