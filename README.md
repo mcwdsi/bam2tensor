@@ -39,6 +39,7 @@
   - [Custom Output Directory](#custom-output-directory)
   - [Using a Custom Genome](#using-a-custom-genome)
   - [Command-Line Options](#command-line-options)
+- [Filtering Conversion Errors](#filtering-conversion-errors)
 - [Inspecting Output Files](#inspecting-output-files)
 - [Output Data Structure](#output-data-structure)
   - [Per-Read Fragment Length (TLEN)](#per-read-fragment-length-tlen)
@@ -66,6 +67,7 @@
 - **Caching**: CpG site indexing is cached to accelerate repeated runs on the same genome
 - **Quality Filtering**: Configurable mapping quality thresholds
 - **Per-Read Fragment Length**: Stores BAM TLEN (template length) alongside the methylation tensor for joint fragment-methylation analysis
+- **Conversion-Error Filters**: Optional per-read filters for incomplete bisulfite/EM-seq conversion (ported from `nebiolabs/mark-nonconverted-reads`) and EM-seq fragment-level over-conversion (Loyfer et al. 2026)
 
 ## Requirements
 
@@ -223,6 +225,25 @@ Options:
                                   determine CpG sites).
   --quality-limit INTEGER         Quality filter for aligned reads (default =
                                   20)
+  --filter-non-converted          Drop reads with >= --non-converted-threshold
+                                  retained non-CpG cytosines, the signature of
+                                  incomplete bisulfite/EM-seq conversion (port
+                                  of nebiolabs/mark-nonconverted-reads).
+                                  Default: off.
+  --non-converted-threshold INTEGER
+                                  Minimum count of retained non-CpG cytosines
+                                  to drop a read (default = 3, matches NEB
+                                  mark-nonconverted-reads).
+  --filter-em-overconversion      Drop EM-seq reads whose covered CpGs are all
+                                  called unmethylated and cover at least --em-
+                                  overconversion-min-cpgs sites (heuristic for
+                                  the fragment-level over-conversion artifact
+                                  described in Loyfer et al. bioRxiv
+                                  2026.03.24.713040). Default: off.
+  --em-overconversion-min-cpgs INTEGER
+                                  Minimum covered CpG count required before
+                                  the EM over-conversion filter will drop a
+                                  read (default = 3).
   --verbose                       Verbose output.
   --skip-cache                    De-novo generate CpG sites (slow).
   --debug                         Debug mode (extensive validity checking +
@@ -248,6 +269,10 @@ Options:
 | `--expected-chromosomes` | Comma-separated list of chromosome names to process. Chromosomes not in this list are skipped. Defaults to human autosomes + sex chromosomes. |
 | `--reference-fasta` | Path to the reference genome FASTA file. Must match the genome used for alignment. |
 | `--quality-limit` | Minimum mapping quality score (MAPQ) for reads to be included. Default is 20. |
+| `--filter-non-converted` | Drop reads with retained non-CpG cytosines above `--non-converted-threshold` (incomplete conversion). See [Filtering Conversion Errors](#filtering-conversion-errors). |
+| `--non-converted-threshold` | Threshold for the non-converted filter. Default is 3. |
+| `--filter-em-overconversion` | Drop EM-seq reads whose covered CpGs are all unmethylated and cover ≥ `--em-overconversion-min-cpgs` sites. See [Filtering Conversion Errors](#filtering-conversion-errors). |
+| `--em-overconversion-min-cpgs` | Minimum covered CpG count before the EM over-conversion filter will drop a read. Default is 3. |
 | `--verbose` | Enable detailed progress output including per-chromosome progress bars. |
 | `--skip-cache` | Force regeneration of CpG site cache. Useful if you've modified the reference or chromosome list. |
 | `--debug` | Enable extensive validation and debug output. Slower but useful for troubleshooting. |
@@ -255,6 +280,66 @@ Options:
 | `--output-dir` | Write `.methylation.npz` files to this directory instead of next to the input BAMs. Created automatically if it doesn't exist. |
 | `--download-reference` | Download and cache a known reference genome. Choices: `hg38`, `hg19`, `mm10`, `T2T-CHM13`. Replaces `--reference-fasta`. |
 | `--list-genomes` | List available reference genomes for `--download-reference` and exit. |
+
+## Filtering Conversion Errors
+
+Bisulfite and EM-seq library preparation can produce two kinds of per-read conversion errors that bias downstream methylation calls. bam2tensor provides two opt-in filters to drop affected reads at extraction time. Both are **default-off**, apply per read, and are recorded in the output `metadata.json` so downstream consumers know which filters were applied.
+
+### `--filter-non-converted` — incomplete conversion
+
+Ports the logic of [nebiolabs/mark-nonconverted-reads](https://github.com/nebiolabs/mark-nonconverted-reads). A read is dropped if it carries at least `--non-converted-threshold` (default 3) retained non-CpG cytosines, a signature of incomplete bisulfite or EM-seq conversion.
+
+- **Bismark BAMs**: counted directly from the `XM` tag's uppercase `H`/`X`/`U` characters (retained cytosines in CHH/CHG/unknown contexts).
+- **Biscuit / bwameth / gem3 BAMs**: counted by comparing the read to the reference via the `MD` tag (using pysam's `get_aligned_pairs(with_seq=True)`). SNPs — where the read's retained `C` sits over a reference base that isn't `C` — are excluded from the count, matching NEB's reference-validation step. No separate FASTA reload is required.
+
+### `--filter-em-overconversion` — EM-seq fragment-level over-conversion
+
+A heuristic inspired by [Loyfer et al. (bioRxiv 2026.03.24.713040)](https://www.biorxiv.org/content/10.64898/2026.03.24.713040v1). That paper shows EM-seq reproducibly produces ~1–2.5% of multi-CpG fragments that appear fully unmethylated across every covered CpG — a fragment-level artifact absent from WGBS and Oxford Nanopore. This filter drops any read whose covered CpGs are **all** called unmethylated *and* cover at least `--em-overconversion-min-cpgs` sites (default 3, the regime where the EM-seq artifact is clearly separable from WGBS in Loyfer et al. Fig. 1C).
+
+The filter is a blunt instrument: it will also drop genuinely fully-unmethylated biological fragments at unmethylated markers. Enable it only when your downstream application (e.g., cfDNA deconvolution at constitutively methylated loci) can tolerate that trade-off.
+
+### Usage
+
+```bash
+bam2tensor \
+    --input-path sample.bam \
+    --reference-fasta GRCh38.fa \
+    --genome-name hg38 \
+    --filter-non-converted \
+    --filter-em-overconversion
+```
+
+Filter parameters and enabled state are written to the output `metadata.json`:
+
+```json
+{
+    "filters": {
+        "non_converted_reads": {"enabled": true, "threshold": 3},
+        "em_overconversion": {"enabled": true, "min_cpgs": 3}
+    }
+}
+```
+
+### Reproducibility note
+
+The two filters differ in whether they can be replayed downstream without the source BAM:
+
+- **`--filter-em-overconversion` is reproducible from the `.npz` alone.** The heuristic is a pure function of each row's CpG state values. A downstream consumer who receives an unfiltered `.npz` can replay the filter at analysis time:
+
+  ```python
+  import scipy.sparse
+  mat = scipy.sparse.load_npz("sample.methylation.npz").tocsr()
+  min_cpgs = 3
+  kept_rows = []
+  for i in range(mat.shape[0]):
+      row = mat.getrow(i).toarray().ravel()
+      covered = row[(row == 0) | (row == 1)]  # drop -1 no-data
+      is_overconv = len(covered) >= min_cpgs and (covered == 0).all()
+      if not is_overconv:
+          kept_rows.append(i)
+  ```
+
+- **`--filter-non-converted` is *not* reproducible from the `.npz` alone.** It relies on retained non-CpG cytosines (or Bismark's `H`/`X`/`U`), which are never written to the matrix. If you need this filter, apply it at extraction time (or re-run bam2tensor against the original BAM).
 
 ## Inspecting Output Files
 
@@ -269,10 +354,14 @@ sample.methylation.npz
   CpG sites:       28,217,448
   Data points:     12,847,322 (sparsity: 99.97%)
   Fragment len:    median 167, mean 182, range [50, 600]
+  Filters:         non-converted (>= 3 non-CpG Cs)
+                   EM over-conversion (all-unmethylated, >= 3 CpGs)
   CpG index CRC32: a1b2c3d4
-  bam2tensor:      v2.4
+  bam2tensor:      v2.5
   File size:       14.2 MB
 ```
+
+When no filters were applied, the line reads `Filters:         none`. Files produced by bam2tensor versions older than v2.5 omit the line entirely.
 
 You can pass multiple files at once:
 
@@ -335,6 +424,7 @@ Each `.methylation.npz` file includes a `metadata.json` entry inside the ZIP arc
 | `expected_chromosomes` | List of chromosomes included in the column mapping |
 | `total_cpg_sites` | Total number of CpG columns in the matrix |
 | `cpg_index_crc32` | CRC32 checksum of the CpG site positions (verifies identical column semantics) |
+| `filters` | Nested dict recording which opt-in conversion-error filters were applied (`non_converted_reads`, `em_overconversion`) and their parameters. See [Filtering Conversion Errors](#filtering-conversion-errors). Added in v2.5. |
 
 This metadata is ignored by `scipy.sparse.load_npz`, so existing code continues to work. To read it:
 
@@ -537,6 +627,10 @@ extract_methylation_data_from_bam(
     input_bam: str,                                    # Path to BAM file
     genome_methylation_embedding: GenomeMethylationEmbedding,  # Embedding object
     quality_limit: int = 20,                           # Minimum MAPQ
+    filter_non_converted: bool = False,                # Drop reads with retained non-CpG Cs
+    non_converted_threshold: int = 3,                  # Threshold for the above filter
+    filter_em_overconversion: bool = False,            # Drop EM-seq fragment-level over-conversion reads
+    em_overconversion_min_cpgs: int = 3,               # Min CpGs before applying the above filter
     verbose: bool = False,                             # Enable verbose output
     debug: bool = False                                # Enable debug output
 ) -> ExtractionResult
