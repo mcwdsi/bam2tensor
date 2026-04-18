@@ -116,6 +116,25 @@ def inspect_npz(npz_path: str) -> None:
         else:
             print("  Fragment len:    all zero (single-end data)")
 
+    if meta and "filters" in meta:
+        filters = meta["filters"]
+        active = []
+        nc = filters.get("non_converted_reads", {})
+        if nc.get("enabled"):
+            active.append(f"non-converted (>= {nc.get('threshold')} non-CpG Cs)")
+        em = filters.get("em_overconversion", {})
+        if em.get("enabled"):
+            active.append(
+                f"EM over-conversion (all-unmethylated, >= "
+                f"{em.get('min_cpgs')} CpGs)"
+            )
+        if active:
+            print(f"  Filters:         {active[0]}")
+            for extra in active[1:]:
+                print(f"                   {extra}")
+        else:
+            print("  Filters:         none")
+
     if meta and "cpg_index_crc32" in meta:
         print(f"  CpG index CRC32: {meta['cpg_index_crc32']}")
     if meta and "bam2tensor_version" in meta:

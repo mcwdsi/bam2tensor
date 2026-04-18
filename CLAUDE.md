@@ -40,7 +40,7 @@ uv run mypy src
 
 ```
 src/bam2tensor/
-  __init__.py      # Package version (2.4)
+  __init__.py      # Package version (2.5)
   __main__.py      # Click CLI entry point (bam2tensor command)
   inspect.py       # Inspect CLI entry point (bam2tensor-inspect command)
   embedding.py     # GenomeMethylationEmbedding class (FASTA parsing, CpG indexing)

@@ -20,7 +20,7 @@ def test_inspect_with_metadata(tmp_path) -> None:
     write_npz_metadata(
         npz_path,
         {
-            "bam2tensor_version": "2.4",
+            "bam2tensor_version": "2.5",
             "genome_name": "hg38",
             "expected_chromosomes": ["chr1", "chr2", "chrX", "chrY"],
             "total_cpg_sites": 5,
@@ -36,7 +36,7 @@ def test_inspect_with_metadata(tmp_path) -> None:
     assert "2" in result.output  # 2 reads
     assert "CpG sites:" in result.output
     assert "deadbeef" in result.output
-    assert "v2.4" in result.output
+    assert "v2.5" in result.output
     assert "chr1, chr2, chrX, chrY" in result.output
 
 
@@ -122,7 +122,7 @@ def test_inspect_end_to_end(tmp_path) -> None:
     assert result.exit_code == 0
     assert "test" in result.output  # genome_name
     assert "CpG index CRC32:" in result.output
-    assert "v2.4" in result.output
+    assert "v2.5" in result.output
 
 
 def test_format_size_bytes() -> None:

@@ -229,6 +229,43 @@ def validate_input_output(
     default=20,
     type=int,
 )
+@click.option(
+    "--filter-non-converted",
+    help=(
+        "Drop reads with >= --non-converted-threshold retained non-CpG "
+        "cytosines, the signature of incomplete bisulfite/EM-seq conversion "
+        "(port of nebiolabs/mark-nonconverted-reads). Default: off."
+    ),
+    is_flag=True,
+)
+@click.option(
+    "--non-converted-threshold",
+    help=(
+        "Minimum count of retained non-CpG cytosines to drop a read "
+        "(default = 3, matches NEB mark-nonconverted-reads)."
+    ),
+    default=3,
+    type=int,
+)
+@click.option(
+    "--filter-em-overconversion",
+    help=(
+        "Drop EM-seq reads whose covered CpGs are all called unmethylated "
+        "and cover at least --em-overconversion-min-cpgs sites (heuristic "
+        "for the fragment-level over-conversion artifact described in "
+        "Loyfer et al. bioRxiv 2026.03.24.713040). Default: off."
+    ),
+    is_flag=True,
+)
+@click.option(
+    "--em-overconversion-min-cpgs",
+    help=(
+        "Minimum covered CpG count required before the EM over-conversion "
+        "filter will drop a read (default = 3)."
+    ),
+    default=3,
+    type=int,
+)
 @click.option("--verbose", help="Verbose output.", is_flag=True)
 @click.option("--skip-cache", help="De-novo generate CpG sites (slow).", is_flag=True)
 @click.option(
@@ -263,6 +300,10 @@ def main(
     expected_chromosomes: str | None,
     reference_fasta: str | None,
     quality_limit: int,
+    filter_non_converted: bool,
+    non_converted_threshold: int,
+    filter_em_overconversion: bool,
+    em_overconversion_min_cpgs: int,
     verbose: bool,
     skip_cache: bool,
     debug: bool,
@@ -300,6 +341,17 @@ def main(
             ``--download-reference`` is used.
         quality_limit: Minimum mapping quality (MAPQ) threshold. Reads below
             this quality are excluded.
+        filter_non_converted: If True, drop reads with at least
+            ``non_converted_threshold`` retained non-CpG cytosines —
+            indicating incomplete bisulfite/EM-seq conversion.
+        non_converted_threshold: Threshold used by the non-converted
+            read filter.
+        filter_em_overconversion: If True, drop reads whose covered CpGs
+            are all called unmethylated and cover at least
+            ``em_overconversion_min_cpgs`` sites — heuristic for EM-seq
+            fragment-level over-conversion (Loyfer et al. 2026).
+        em_overconversion_min_cpgs: Minimum covered CpG count required
+            before the over-conversion filter will drop a read.
         verbose: If True, print detailed progress information.
         skip_cache: If True, regenerate the CpG site index even if a cache
             file exists.
@@ -382,6 +434,16 @@ def main(
     print(f"  Reference:     {reference_fasta}")
     print(f"  Chromosomes:   {chrom_display}")
     print(f"  Quality limit: MAPQ >= {quality_limit}")
+    if filter_non_converted:
+        print(
+            f"  Filters:       non-converted reads (>= "
+            f"{non_converted_threshold} retained non-CpG Cs)"
+        )
+    if filter_em_overconversion:
+        print(
+            f"                 EM over-conversion (all-unmethylated, >= "
+            f"{em_overconversion_min_cpgs} CpGs)"
+        )
     if output_dir:
         print(f"  Output dir:    {output_dir}")
     else:
@@ -448,6 +510,10 @@ def main(
                 input_bam=input_bam,
                 genome_methylation_embedding=genome_methylation_embedding,
                 quality_limit=quality_limit,
+                filter_non_converted=filter_non_converted,
+                non_converted_threshold=non_converted_threshold,
+                filter_em_overconversion=filter_em_overconversion,
+                em_overconversion_min_cpgs=em_overconversion_min_cpgs,
                 verbose=verbose,
                 debug=debug,
             )
@@ -476,6 +542,16 @@ def main(
                 "expected_chromosomes": chrom_list,
                 "total_cpg_sites": genome_methylation_embedding.total_cpg_sites,
                 "cpg_index_crc32": cpg_crc32,
+                "filters": {
+                    "non_converted_reads": {
+                        "enabled": filter_non_converted,
+                        "threshold": non_converted_threshold,
+                    },
+                    "em_overconversion": {
+                        "enabled": filter_em_overconversion,
+                        "min_cpgs": em_overconversion_min_cpgs,
+                    },
+                },
             },
         )
         print(f"  Output:        {output_file}")

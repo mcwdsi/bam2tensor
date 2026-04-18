@@ -80,6 +80,146 @@ class ExtractionResult(NamedTuple):
 _SKIP_FLAGS = 0x400 | 0x200 | 0x100 | 0x800
 
 
+def count_non_cpg_retained_xm(xm_tag: str) -> int:
+    """Count retained non-CpG cytosines in a Bismark XM methylation string.
+
+    Bismark's ``XM`` tag encodes per-base methylation context. Uppercase
+    letters indicate a cytosine that remained as ``C`` in the read
+    (i.e., was *not* converted by bisulfite/EM-seq treatment). ``H``,
+    ``X`` and ``U`` correspond to retained cytosines in CHH, CHG and
+    unknown-context positions respectively. A high count of these on a
+    single read is a strong signal of incomplete conversion.
+
+    Args:
+        xm_tag: The value of a read's Bismark ``XM`` tag.
+
+    Returns:
+        The count of ``H``, ``X`` and ``U`` characters in ``xm_tag``.
+
+    Example:
+        >>> count_non_cpg_retained_xm("..Z..hhh..HHH..z..")
+        3
+    """
+    return xm_tag.count("H") + xm_tag.count("X") + xm_tag.count("U")
+
+
+def count_non_cpg_retained_reference(
+    aligned_segment: pysam.AlignedSegment,
+    is_reverse_parent_strand: bool,
+) -> int:
+    """Count retained non-CpG bases validated against the reference.
+
+    For a correctly bisulfite- or EM-seq-converted read, every
+    non-CpG cytosine on the parent strand should have been converted.
+    On the forward-parent strand that means every non-CpG ``C`` in the
+    reference should appear as ``T`` in the read; on the reverse-parent
+    strand every non-CpG ``G`` should appear as ``A``. Positions where
+    the read still carries the unconverted base *and* the reference
+    genuinely has a ``C``/``G`` (i.e., the mismatch is not a SNP) count
+    as retained.
+
+    This is a faithful port of the logic in
+    ``nebiolabs/mark-nonconverted-reads``, re-using the read's existing
+    ``MD`` tag (via :py:meth:`pysam.AlignedSegment.get_aligned_pairs`
+    with ``with_seq=True``) instead of requiring a separate reference
+    FASTA.
+
+    Args:
+        aligned_segment: A pysam aligned read. Must carry an ``MD``
+            tag; BAMs produced by Bismark, Biscuit, bwameth and gem3
+            all set this tag by default.
+        is_reverse_parent_strand: ``True`` if the read derives from the
+            reverse (OB/CTOB) bisulfite parent strand, ``False`` for
+            the forward (OT/CTOT) strand.
+
+    Returns:
+        The number of reference-validated retained non-CpG
+        cytosines (or guanines, for the reverse parent strand). Returns
+        ``0`` when the read has no sequence or no ``MD`` tag is present.
+    """
+    if aligned_segment.query_sequence is None:
+        return 0
+
+    try:
+        pairs = aligned_segment.get_aligned_pairs(matches_only=True, with_seq=True)
+    except ValueError:
+        # MD tag missing — cannot validate against reference.
+        return 0
+
+    # Map ref_pos → reference base (uppercase) for CpG-context lookup.
+    # matches_only=True guarantees query_pos, ref_pos, ref_base are all set.
+    ref_pos_to_base = {rpos: rb.upper() for _, rpos, rb in pairs}
+
+    # On match, pysam returns ref_base uppercase (query matches ref).
+    # On mismatch (SNP), it returns lowercase. We only care about matches
+    # where ref is C/G — those are genuine retained, non-converted bases.
+    target = "G" if is_reverse_parent_strand else "C"
+
+    count = 0
+    for _, rpos, ref_base in pairs:
+        if ref_base != target:
+            # Not a match, or ref is not C/G. This rejects SNPs (lowercase)
+            # and converted positions (read has T/A, match has different base).
+            continue
+        # Exclude CpG context: on forward strand, next ref base == G;
+        # on reverse strand, previous ref base == C.
+        if is_reverse_parent_strand:
+            if ref_pos_to_base.get(rpos - 1) == "C":
+                continue
+        else:
+            if ref_pos_to_base.get(rpos + 1) == "G":
+                continue
+        count += 1
+
+    return count
+
+
+def is_em_overconversion_read(
+    read_cpg_states: list[int],
+    min_cpgs: int,
+) -> bool:
+    """Identify reads flagged as EM-seq fragment-level over-conversion.
+
+    Loyfer et al. (bioRxiv 2026.03.24.713040) report that EM-seq
+    produces a reproducible ~1–2.5% of multi-CpG fragments that appear
+    fully unmethylated across every covered CpG, driven by failed TET
+    protection and subsequent APOBEC hyper-conversion of an entire
+    molecule. At constitutively methylated loci these reads are purely
+    technical. Without a per-region methylation prior, the simplest
+    correction consistent with their observation is: drop reads whose
+    covered CpGs are all called unmethylated *and* cover at least
+    ``min_cpgs`` sites (the paper's Fig. 1C regime where the artifact
+    diverges clearly from WGBS).
+
+    This heuristic also drops genuinely fully-unmethylated biological
+    fragments, so callers should opt in only when the downstream
+    application can tolerate that trade-off.
+
+    Args:
+        read_cpg_states: Per-CpG methylation state values for a single
+            read, in column-order, using the bam2tensor encoding
+            (``1``=methylated, ``0``=unmethylated, ``-1``=no data).
+        min_cpgs: Minimum number of covered CpGs required to apply the
+            filter. Reads with fewer covered CpGs are never flagged.
+
+    Returns:
+        ``True`` when the read has at least ``min_cpgs`` covered CpGs
+        and every covered CpG is called unmethylated (value ``0``).
+        ``-1`` (no-data) values do not count as unmethylated.
+
+    Example:
+        >>> is_em_overconversion_read([0, 0, 0], min_cpgs=3)
+        True
+        >>> is_em_overconversion_read([0, 0, 1], min_cpgs=3)
+        False
+        >>> is_em_overconversion_read([0, 0], min_cpgs=3)
+        False
+    """
+    if len(read_cpg_states) < min_cpgs:
+        return False
+    return all(state == 0 for state in read_cpg_states)
+
+
 def detect_aligner(input_bam: str, sample_size: int = 1000) -> str:
     """Detect the aligner used to produce a BAM file by checking read tags.
 
@@ -198,6 +338,10 @@ def extract_methylation_data_from_bam(
     input_bam: str,
     genome_methylation_embedding: GenomeMethylationEmbedding,
     quality_limit: int = 20,
+    filter_non_converted: bool = False,
+    non_converted_threshold: int = 3,
+    filter_em_overconversion: bool = False,
+    em_overconversion_min_cpgs: int = 3,
     verbose: bool = False,
     debug: bool = False,
 ) -> ExtractionResult:
@@ -215,6 +359,17 @@ def extract_methylation_data_from_bam(
         - Secondary and supplementary alignments are excluded
         - For Biscuit/bwameth/gem3: only parent-strand reads are processed
         - For Bismark: all reads are processed (XM tag has pre-resolved calls)
+
+    Two additional, opt-in per-read filters are available:
+        - Non-converted reads (``filter_non_converted``): drops reads with
+          too many retained non-CpG cytosines, the hallmark of incomplete
+          bisulfite/EM-seq conversion. Ports the logic of
+          ``nebiolabs/mark-nonconverted-reads``.
+        - EM-seq fragment-level over-conversion
+          (``filter_em_overconversion``): drops reads whose covered CpGs
+          are all called unmethylated, a heuristic for the EM-seq
+          artifact described by Loyfer et al.
+          (bioRxiv 2026.03.24.713040).
 
     Two extraction paths are supported, detected automatically per-read:
 
@@ -238,6 +393,23 @@ def extract_methylation_data_from_bam(
         quality_limit: Minimum mapping quality (MAPQ) threshold for reads.
             Reads with MAPQ below this value are skipped. Default is 20,
             which excludes reads mapping to multiple locations equally well.
+        filter_non_converted: If True, drop reads that carry at least
+            ``non_converted_threshold`` retained non-CpG cytosines, a
+            signature of incomplete bisulfite/EM-seq conversion. Default
+            False.
+        non_converted_threshold: Minimum count of retained non-CpG
+            cytosines required for the non-converted filter to drop a
+            read. Matches the NEB ``mark-nonconverted-reads`` default of
+            3.
+        filter_em_overconversion: If True, drop reads whose covered CpGs
+            are all called unmethylated and cover at least
+            ``em_overconversion_min_cpgs`` sites — the Loyfer et al.
+            EM-seq fragment-level over-conversion heuristic. Default
+            False.
+        em_overconversion_min_cpgs: Minimum covered CpG count required
+            before the over-conversion filter will drop a read. Matches
+            the regime in Loyfer et al. Fig. 1C where the EM-seq
+            artifact is clearly separable from WGBS.
         verbose: If True, display a progress bar and print the total read
             count. Useful for monitoring progress on large files.
         debug: If True, enable extensive validation and debug output.
@@ -354,6 +526,12 @@ def extract_methylation_data_from_bam(
             if aligned_segment.flag & _SKIP_FLAGS:
                 continue
 
+            # Per-read buffers. We only flush these into the global
+            # coo_* arrays once the read passes all filters (including
+            # the post-CpG EM over-conversion filter).
+            read_cpg_cols: list[int] = []
+            read_cpg_data: list[int] = []
+
             # ============================================================
             # Bismark path: XM tag contains pre-resolved methylation calls.
             # No strand filtering needed — Bismark already resolved strand
@@ -362,6 +540,13 @@ def extract_methylation_data_from_bam(
             # ============================================================
             if aligned_segment.has_tag("XM"):
                 xm_tag: str = aligned_segment.get_tag("XM")  # type: ignore[assignment]
+
+                # Non-converted filter (Bismark): XM tag already encodes
+                # retained non-CpG cytosines as H/X/U. Apply before any
+                # CpG work so we bail as early as possible.
+                if filter_non_converted:
+                    if count_non_cpg_retained_xm(xm_tag) >= non_converted_threshold:
+                        continue
 
                 # Find CpG sites covered by this read
                 start_idx = bisect.bisect_left(
@@ -385,7 +570,6 @@ def extract_methylation_data_from_bam(
                 if debug:
                     print(f"Query (Bismark): {aligned_segment.query_name}")
 
-                has_cpg_data = False
                 for query_pos, ref_pos in this_segment_cpgs:
                     # Bounds check: XM tag should match query length, but be defensive
                     if query_pos >= len(xm_tag):
@@ -393,39 +577,49 @@ def extract_methylation_data_from_bam(
 
                     xm_char = xm_tag[query_pos]
                     if xm_char == "Z":
-                        coo_data.append(1)  # Methylated CpG
+                        read_cpg_data.append(1)  # Methylated CpG
                     elif xm_char == "z":
-                        coo_data.append(0)  # Unmethylated CpG
+                        read_cpg_data.append(0)  # Unmethylated CpG
                     else:
                         # Non-CpG context at a CpG site (shouldn't happen
                         # normally, but possible with edge-case alignments)
-                        coo_data.append(-1)
+                        read_cpg_data.append(-1)
 
-                    coo_row.append(read_number)
-                    coo_col.append(
+                    read_cpg_cols.append(
                         genome_methylation_embedding.genomic_position_to_embedding(
                             chrom,
                             ref_pos + 1,
                         )
                     )
-                    has_cpg_data = True
 
                     if debug:
                         print(f"\t{query_pos} {ref_pos} XM={xm_char}")
 
-                if has_cpg_data:
+                if not read_cpg_data:
+                    continue
+
+                if filter_em_overconversion and is_em_overconversion_read(
+                    read_cpg_data, em_overconversion_min_cpgs
+                ):
                     if debug:
-                        # Ensure each read is only seen once
-                        read_key = aligned_segment.query_name + (  # type: ignore
-                            "_1" if aligned_segment.is_read1 else "_2"
-                        )
-                        assert (
-                            read_key not in debug_read_name_to_row_number
-                        ), "Read seen twice!"
-                        debug_read_name_to_row_number[read_key] = read_number
-                        print("************************************************\n")
-                    tlen_list.append(aligned_segment.template_length)
-                    read_number += 1
+                        print("\tEM over-conversion filter: dropping read.")
+                    continue
+
+                if debug:
+                    read_key = aligned_segment.query_name + (  # type: ignore
+                        "_1" if aligned_segment.is_read1 else "_2"
+                    )
+                    assert (
+                        read_key not in debug_read_name_to_row_number
+                    ), "Read seen twice!"
+                    debug_read_name_to_row_number[read_key] = read_number
+                    print("************************************************\n")
+
+                coo_row.extend([read_number] * len(read_cpg_cols))
+                coo_col.extend(read_cpg_cols)
+                coo_data.extend(read_cpg_data)
+                tlen_list.append(aligned_segment.template_length)
+                read_number += 1
 
                 continue  # Skip the Biscuit/bwameth/gem3 path below
 
@@ -460,6 +654,22 @@ def extract_methylation_data_from_bam(
                     print("\tNot on methylated strand, ignoring.")
                 continue
 
+            # Non-converted filter (Biscuit/bwameth/gem3): count retained
+            # non-CpG Cs (forward parent) or Gs (reverse parent) validated
+            # against the reference via the MD tag. Applied after the
+            # strand check so we don't waste work on daughter-strand reads.
+            if filter_non_converted:
+                if (
+                    count_non_cpg_retained_reference(
+                        aligned_segment,
+                        bool(bisulfite_parent_strand_is_reverse),
+                    )
+                    >= non_converted_threshold
+                ):
+                    if debug:
+                        print("\tNon-converted filter: dropping read.")
+                    continue
+
             # Use bisect to find CpGs covered by this read
             # aligned_segment.reference_start is 0-based inclusive
             # aligned_segment.reference_end is 0-based exclusive
@@ -492,15 +702,6 @@ def extract_methylation_data_from_bam(
                     "XB"
                 )  # Bisulfite strand tag (YD for Biscuit/bwameth, XB for gem3)
 
-                # Ensure each read is only seen once
-                assert (
-                    aligned_segment.query_name not in debug_read_name_to_row_number
-                ), "Read seen twice!"
-                debug_read_name_to_row_number[
-                    aligned_segment.query_name  # type: ignore
-                    + ("_1" if aligned_segment.is_read1 else "_2")
-                ] = read_number
-
             # TODO: We ignore paired/unpaired read status for now. Should we treat paired reads / overlapping reads differently?
 
             # get_aligned_pairs returns a list of tuples of (read_pos, ref_pos)
@@ -524,12 +725,7 @@ def extract_methylation_data_from_bam(
                 # query_base_raw = aligned_segment.get_forward_sequence()[query_pos] # raw off sequencer
                 # query_base_no_offset = aligned_segment.query_alignment_sequence[query_pos] # this needs to be offset by the soft clip
 
-                # Store the read # in our sparse array
-                coo_row.append(read_number)
-
-                # Store the CpG site in our sparse array
-                # TODO: Object orient these inputs? -- lots of bad inheritence style here
-                coo_col.append(
+                read_cpg_cols.append(
                     genome_methylation_embedding.genomic_position_to_embedding(
                         chrom,
                         ref_pos + 1,
@@ -538,29 +734,46 @@ def extract_methylation_data_from_bam(
 
                 if query_base == "C":
                     # Methylated
-                    coo_data.append(1)
+                    read_cpg_data.append(1)
                     if debug:
                         print(f"\t{query_pos} {ref_pos} C->{query_base} [Methylated]")
                 elif query_base == "T":
-                    coo_data.append(0)
+                    read_cpg_data.append(0)
                     # Unmethylated
                     if debug:
                         print(f"\t{query_pos} {ref_pos} C->{query_base} [Unmethylated]")
                 else:
-                    coo_data.append(-1)  # or just 0?
+                    read_cpg_data.append(-1)
                     if debug:
                         print(
                             f"\t{query_pos} {ref_pos} C->{query_base} [Unknown! SNV? Indel?]"
                         )
 
+            if filter_em_overconversion and is_em_overconversion_read(
+                read_cpg_data, em_overconversion_min_cpgs
+            ):
+                if debug:
+                    print("\tEM over-conversion filter: dropping read.")
+                continue
+
+            if debug:
+                # Ensure each read is only seen once
+                assert (
+                    aligned_segment.query_name not in debug_read_name_to_row_number
+                ), "Read seen twice!"
+                debug_read_name_to_row_number[
+                    aligned_segment.query_name  # type: ignore
+                    + ("_1" if aligned_segment.is_read1 else "_2")
+                ] = read_number
+
+            coo_row.extend([read_number] * len(read_cpg_cols))
+            coo_col.extend(read_cpg_cols)
+            coo_data.extend(read_cpg_data)
             tlen_list.append(aligned_segment.template_length)
             read_number += 1
 
             if debug:
                 print("************************************************\n")
-
-                # query_bp = aligned_segment.query_sequence[pileupread.query_position]
-                # reference_bp = aligned_segment.get_reference_sequence()[aligned_segment.reference_start - pileupcolumn.reference_pos].upper()
 
     ## IIRC there's still a critical edge here, where sometimes we raise ValueError('row index exceeds matrix dimensions')
 

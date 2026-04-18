@@ -1,6 +1,6 @@
 [project]
 name = "bam2tensor"
-version = "2.4"
+version = "2.5"
 description = "Convert bisulfite-seq and EM-seq BAM files to sparse tensor representations of DNA methylation"
 authors = [{ name = "Nick Semenkovich", email = "semenko@alum.mit.edu" }]
 license = "MIT"
