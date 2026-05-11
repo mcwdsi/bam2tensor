@@ -706,25 +706,36 @@ def extract_methylation_data_from_bam(
 
             # get_aligned_pairs returns a list of tuples of (read_pos, ref_pos)
             # We filter this to only include the specific CpG sites from above
+            aligned_pairs = aligned_segment.get_aligned_pairs(matches_only=True)
             this_segment_cpgs = [
-                e
-                for e in aligned_segment.get_aligned_pairs(matches_only=True)
-                if e[1] + 1 in cpgs_within_read_set
+                e for e in aligned_pairs if e[1] + 1 in cpgs_within_read_set
             ]
 
             # If no CpGs covered (after filtering for matches only), skip
             if not this_segment_cpgs:
                 continue
 
-            # Ok we're on the same strand as the methylation (right?)
-            # Let's compare the possible CpGs in this interval to the reference and note status
-            #   A methylated C will be *unchanged* and read as C (pair G)
-            #   An unmethylated C will be *changed* and read as T (pair A)
-            for query_pos, ref_pos in this_segment_cpgs:
-                query_base = aligned_segment.query_sequence[query_pos]  # type: ignore
-                # query_base_raw = aligned_segment.get_forward_sequence()[query_pos] # raw off sequencer
-                # query_base_no_offset = aligned_segment.query_alignment_sequence[query_pos] # this needs to be offset by the soft clip
+            # OT (forward parent): methylation-informative base sits on the
+            #   top-strand C at ref_pos. BAM SEQ is reference-oriented, so
+            #   C = methylated, T = unmethylated.
+            # OB (reverse parent): the original bottom-strand C lives at
+            #   ref_pos + 1 (the G of the top-strand CG). After the aligner
+            #   reverse-complements into reference orientation for BAM
+            #   storage, that base reads G = methylated, A = unmethylated.
+            #   At ref_pos itself, BAM always shows C (the unaffected
+            #   bottom-strand G reverse-complemented), which is why reading
+            #   ref_pos on OB reads collapses every CpG to "methylated".
+            query_sequence = aligned_segment.query_sequence
+            if bisulfite_parent_strand_is_reverse:
+                methylated_base, unmethylated_base = "G", "A"
+                # Indels at the CpG boundary mean ref_pos + 1 isn't always
+                # query_pos + 1 — go through a ref -> query map.
+                ref_to_query: dict[int, int] = {ref: q for q, ref in aligned_pairs}
+            else:
+                methylated_base, unmethylated_base = "C", "T"
+                ref_to_query = {}
 
+            for query_pos, ref_pos in this_segment_cpgs:
                 read_cpg_cols.append(
                     genome_methylation_embedding.genomic_position_to_embedding(
                         chrom,
@@ -732,21 +743,34 @@ def extract_methylation_data_from_bam(
                     )
                 )
 
-                if query_base == "C":
-                    # Methylated
+                if bisulfite_parent_strand_is_reverse:
+                    target_query_pos = ref_to_query.get(ref_pos + 1)
+                    if target_query_pos is None:
+                        read_cpg_data.append(-1)
+                        if debug:
+                            print(f"\t{query_pos} {ref_pos} [Indel at OB target]")
+                        continue
+                    query_base = query_sequence[target_query_pos]  # type: ignore[index]
+                else:
+                    query_base = query_sequence[query_pos]  # type: ignore[index]
+
+                if query_base == methylated_base:
                     read_cpg_data.append(1)
                     if debug:
-                        print(f"\t{query_pos} {ref_pos} C->{query_base} [Methylated]")
-                elif query_base == "T":
+                        print(
+                            f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Methylated]"
+                        )
+                elif query_base == unmethylated_base:
                     read_cpg_data.append(0)
-                    # Unmethylated
                     if debug:
-                        print(f"\t{query_pos} {ref_pos} C->{query_base} [Unmethylated]")
+                        print(
+                            f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Unmethylated]"
+                        )
                 else:
                     read_cpg_data.append(-1)
                     if debug:
                         print(
-                            f"\t{query_pos} {ref_pos} C->{query_base} [Unknown! SNV? Indel?]"
+                            f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Unknown! SNV? Indel?]"
                         )
 
             if filter_em_overconversion and is_em_overconversion_read(

@@ -122,7 +122,7 @@ def test_inspect_end_to_end(tmp_path) -> None:
     assert result.exit_code == 0
     assert "test" in result.output  # genome_name
     assert "CpG index CRC32:" in result.output
-    assert "v2.5" in result.output
+    assert "v2.6" in result.output
 
 
 def test_format_size_bytes() -> None:

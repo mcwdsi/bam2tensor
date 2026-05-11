@@ -1074,6 +1074,133 @@ def test_biscuit_debug_mode_ct_bases(tmp_path):
     assert result.matrix.shape[0] == 1
 
 
+def test_biscuit_ob_strand_methylation_extraction(tmp_path):
+    """Biscuit/bwameth OB-strand (YD=r, is_reverse=True) reads must read the
+    methylation-informative base at ref_pos+1 (G=methylated, A=unmethylated),
+    not ref_pos (which is always C in BAM SEQ regardless of methylation state).
+
+    Regression for the bug where OB reads were extracted with C/T logic at
+    ref_pos and thus scored as universally methylated.
+    """
+    fasta_path = tmp_path / "ref.fa"
+    # CpGs at 1-based positions 10, 21 (top-strand C at 0-based 9, 20; G at 10, 21).
+    seq = "N" * 9 + "CG" + "N" * 9 + "CG" + "N" * 128
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + seq + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_biscuit_ob",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    bam_path = tmp_path / "test.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": len(seq), "SN": "chr1"}]}
+    # OB read: BAM SEQ is reference-oriented. The C of each top-strand CG is
+    # always C in BAM (bottom-strand G reverse-complemented). The G of each
+    # top-strand CG is what carries the methylation signal: G=methylated,
+    # A=unmethylated.
+    read_seq = list("N" * len(seq))
+    read_seq[9] = "C"  # top-strand C of CpG#1 (always C in BAM for OB)
+    read_seq[10] = "G"  # methylated → G at ref_pos+1
+    read_seq[20] = "C"  # top-strand C of CpG#2 (always C in BAM for OB)
+    read_seq[21] = "A"  # unmethylated → A at ref_pos+1
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "ob_read"
+        a.query_sequence = "".join(read_seq)
+        a.flag = 0x10  # reverse-mapped
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, len(seq))]
+        a.set_tag("MD", str(len(seq)))
+        a.set_tag("YD", "r")  # OB / reverse parent strand
+        out_bam.write(a)
+    pysam.index(str(bam_path))
+
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=str(bam_path),
+        genome_methylation_embedding=emb,
+    )
+    assert result.matrix.shape[0] == 1
+    assert result.matrix.nnz == 2
+    data = sorted(result.matrix.data)
+    assert data == [0, 1], (
+        f"Expected one methylated (1) and one unmethylated (0) call, got {data}. "
+        "If this is all 1s, the OB-strand base lookup regression has returned."
+    )
+
+
+def test_biscuit_ot_and_ob_share_cpg_columns(tmp_path):
+    """OT and OB reads at the same CpG must land in the same embedding column
+    (canonical CpG site = top-strand C, ref_pos+1 in 1-based coordinates).
+    """
+    fasta_path = tmp_path / "ref.fa"
+    seq = "N" * 9 + "CG" + "N" * 9 + "CG" + "N" * 128
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + seq + "\n")
+
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_biscuit_ot_ob_columns",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    bam_path = tmp_path / "test.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": len(seq), "SN": "chr1"}]}
+    # OT read: C at top-strand C positions = methylated at both CpGs.
+    ot_seq = list("N" * len(seq))
+    ot_seq[9] = "C"
+    ot_seq[20] = "C"
+    # OB read (BAM in reference orientation): G at top-strand G positions
+    # = methylated at both CpGs.
+    ob_seq = list("N" * len(seq))
+    ob_seq[9] = "C"
+    ob_seq[10] = "G"
+    ob_seq[20] = "C"
+    ob_seq[21] = "G"
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        a = pysam.AlignedSegment()
+        a.query_name = "ot_read"
+        a.query_sequence = "".join(ot_seq)
+        a.flag = 0
+        a.reference_id = 0
+        a.reference_start = 0
+        a.mapping_quality = 60
+        a.cigartuples = [(0, len(seq))]
+        a.set_tag("MD", str(len(seq)))
+        a.set_tag("YD", "f")
+        out_bam.write(a)
+        b = pysam.AlignedSegment()
+        b.query_name = "ob_read"
+        b.query_sequence = "".join(ob_seq)
+        b.flag = 0x10
+        b.reference_id = 0
+        b.reference_start = 0
+        b.mapping_quality = 60
+        b.cigartuples = [(0, len(seq))]
+        b.set_tag("MD", str(len(seq)))
+        b.set_tag("YD", "r")
+        out_bam.write(b)
+    pysam.index(str(bam_path))
+
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=str(bam_path),
+        genome_methylation_embedding=emb,
+    )
+    assert result.matrix.shape[0] == 2
+    # Both reads call both CpGs methylated, so we expect two reads × two CpGs
+    # in the same two columns, all with value 1.
+    coo = result.matrix.tocoo()
+    ot_cols = sorted(int(c) for r, c in zip(coo.row, coo.col) if r == 0)
+    ob_cols = sorted(int(c) for r, c in zip(coo.row, coo.col) if r == 1)
+    assert ot_cols == ob_cols, f"OT and OB columns diverged: OT={ot_cols} OB={ob_cols}"
+    assert list(result.matrix.data) == [1, 1, 1, 1]
+
+
 # ======================================================================
 # XB tag (gem3/Blueprint) extraction tests
 # ======================================================================
