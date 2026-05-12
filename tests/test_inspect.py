@@ -6,7 +6,7 @@ import numpy as np
 import scipy.sparse
 from click.testing import CliRunner
 
-from bam2tensor import __main__
+from bam2tensor import __main__, __version__
 from bam2tensor.inspect import _format_size
 from bam2tensor.inspect import main as inspect_main
 from bam2tensor.metadata import write_npz_metadata, write_npz_tlen
@@ -122,7 +122,7 @@ def test_inspect_end_to_end(tmp_path) -> None:
     assert result.exit_code == 0
     assert "test" in result.output  # genome_name
     assert "CpG index CRC32:" in result.output
-    assert "v2.6" in result.output
+    assert f"v{__version__}" in result.output
 
 
 def test_format_size_bytes() -> None:

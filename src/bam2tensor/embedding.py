@@ -45,6 +45,9 @@ import numpy as np
 from tqdm import tqdm
 from Bio import SeqIO
 
+from bam2tensor import __version__
+from bam2tensor.metadata import compute_fasta_sha256
+
 
 class GenomeMethylationEmbedding:
     """Manages CpG site positions and coordinate conversions for a reference genome.
@@ -173,7 +176,12 @@ class GenomeMethylationEmbedding:
                     window_size == self.window_size
                 ), "Window size does not match cached window size!"
             except FileNotFoundError as e:
-                if self.verbose:
+                # Stale-cache rejections (version or FASTA SHA-256 mismatch)
+                # raise FileNotFoundError too — always surface those so users
+                # are not silently regenerating a cache they thought was valid.
+                if os.path.exists(self.cache_file):
+                    print(f"Discarding stale embedding cache: {e}")
+                elif self.verbose:
                     print("Could not load methylation embedding from cache: " + str(e))
 
         if not cache_available:
@@ -224,6 +232,9 @@ class GenomeMethylationEmbedding:
         The cache file is named "{genome_name}.cache.json.gz" and contains:
         - genome_name: The genome identifier
         - fasta_source: Path to the original FASTA file
+        - fasta_sha256: SHA-256 of the FASTA file bytes (for cache validation)
+        - bam2tensor_version: Version that produced this cache
+        - total_cpg_sites: Total CpG count across all included chromosomes
         - expected_chromosomes: List of included chromosomes
         - window_size: The window_size parameter (for compatibility checking)
         - cpg_sites_dict: Dictionary of chromosome -> list of CpG positions
@@ -241,9 +252,13 @@ class GenomeMethylationEmbedding:
 
         assert len(self.cpg_sites_dict) > 0, "CpG sites dict is empty!"
 
+        total_cpg_sites = sum(len(v) for v in self.cpg_sites_dict.values())
         cache_data = {
             "genome_name": self.genome_name,
             "fasta_source": self.fasta_source,
+            "fasta_sha256": compute_fasta_sha256(self.fasta_source),
+            "bam2tensor_version": __version__,
+            "total_cpg_sites": total_cpg_sites,
             "expected_chromosomes": self.expected_chromosomes,
             "window_size": self.window_size,
             "cpg_sites_dict": self.cpg_sites_dict,
@@ -263,38 +278,66 @@ class GenomeMethylationEmbedding:
         restore all CpG site data. If successful, this avoids the slow
         FASTA parsing step.
 
+        Provenance is validated before the cached data is trusted: the
+        cache must have been written by the same major.minor of
+        bam2tensor and must reference a FASTA file with the same SHA-256
+        as the current ``fasta_source``. A stale cache is rejected with
+        a ``FileNotFoundError`` so the caller falls through to a fresh
+        FASTA parse and overwrites the stale cache on save.
+
         Returns:
             True if the cache was successfully loaded.
 
         Raises:
-            FileNotFoundError: If the cache file does not exist.
+            FileNotFoundError: If the cache file does not exist, or if
+                the cache is stale (version mismatch or FASTA SHA-256
+                mismatch).
 
         Note:
-            After loading, the caller should verify that expected_chromosomes
-            and window_size match the current configuration, as this method
-            overwrites those attributes with cached values.
+            After loading, the caller should verify that
+            ``expected_chromosomes`` and ``window_size`` match the current
+            configuration, as this method overwrites those attributes
+            with cached values.
         """
 
-        if os.path.exists(self.cache_file):
-            if self.verbose:
-                print(f"\tReading embedding from cache: {self.cache_file}")
-
-            # TODO: Add type hinting via TypedDicts?
-            # e.g. https://stackoverflow.com/questions/51291722/define-a-jsonable-type-using-mypy-pep-526
-            with gzip.open(self.cache_file, "rt") as f:
-                self.cache_data = json.load(f)
-
-            # Load the cached data
-            self.genome_name = self.cache_data["genome_name"]
-            self.fasta_source = self.cache_data["fasta_source"]
-            self.expected_chromosomes = self.cache_data["expected_chromosomes"]
-            self.window_size = self.cache_data["window_size"]
-            self.cpg_sites_dict = self.cache_data["cpg_sites_dict"]
-
-            if self.verbose:
-                print(f"\tCached genome fasta source: {self.fasta_source}")
-        else:
+        if not os.path.exists(self.cache_file):
             raise FileNotFoundError("No cache of embedding found.")
+
+        if self.verbose:
+            print(f"\tReading embedding from cache: {self.cache_file}")
+
+        with gzip.open(self.cache_file, "rt") as f:
+            self.cache_data = json.load(f)
+
+        # Validate cache provenance: stale caches predating v2.7 used a
+        # case-sensitive CpG search that silently dropped roughly half
+        # the CpG sites in soft-masked FASTAs (e.g. UCSC's hg38.fa.gz).
+        cached_version = self.cache_data.get("bam2tensor_version")
+        if cached_version != __version__:
+            raise FileNotFoundError(
+                f"Stale cache {self.cache_file!r}: written by bam2tensor "
+                f"{cached_version!r}, current is {__version__!r}. "
+                "Regenerating."
+            )
+
+        cached_fasta_sha256 = self.cache_data.get("fasta_sha256")
+        current_fasta_sha256 = compute_fasta_sha256(self.fasta_source)
+        if cached_fasta_sha256 != current_fasta_sha256:
+            raise FileNotFoundError(
+                f"Stale cache {self.cache_file!r}: FASTA SHA-256 mismatch "
+                f"(cache={cached_fasta_sha256}, current={current_fasta_sha256}). "
+                "Regenerating."
+            )
+
+        # Load the cached data
+        self.genome_name = self.cache_data["genome_name"]
+        self.fasta_source = self.cache_data["fasta_source"]
+        self.expected_chromosomes = self.cache_data["expected_chromosomes"]
+        self.window_size = self.cache_data["window_size"]
+        self.cpg_sites_dict = self.cache_data["cpg_sites_dict"]
+
+        if self.verbose:
+            print(f"\tCached genome fasta source: {self.fasta_source}")
 
         return True
 
@@ -350,7 +393,11 @@ class GenomeMethylationEmbedding:
                 if self.verbose:
                     tqdm.write(f"\tSkipping chromosome {seqrecord.id}")
                 continue
-            sequence = seqrecord.seq
+            # Upper-case the sequence so soft-masked FASTAs (UCSC's default
+            # hg38.fa.gz uses lowercase for RepeatMasker/TRF regions) do not
+            # silently drop CpGs in repeats — that is roughly half of all
+            # CpGs in the human genome.
+            sequence = seqrecord.seq.upper()
 
             # Find all CpG sites
             # The pos+1 is because we want to store the 1-based position, because .bed is wild and arguably 1-based maybe:

@@ -27,17 +27,44 @@ Example:
         hg38
 """
 
+import hashlib
 import io
 import json
 import zipfile
 import zlib
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from bam2tensor.embedding import GenomeMethylationEmbedding
+if TYPE_CHECKING:
+    # Avoid a runtime circular import: embedding.py imports compute_fasta_sha256
+    # from this module, and this module only needs the embedding type for
+    # annotations.
+    from bam2tensor.embedding import GenomeMethylationEmbedding
 
 
-def compute_cpg_index_crc32(embedding: GenomeMethylationEmbedding) -> str:
+def compute_fasta_sha256(fasta_source: str) -> str:
+    """Compute the SHA-256 of a FASTA file's bytes on disk.
+
+    Used to stamp the CpG-site cache (see
+    :py:class:`bam2tensor.embedding.GenomeMethylationEmbedding`) so a
+    cache can be rejected when the underlying FASTA changes (e.g. a
+    user swaps a soft-masked build for a hard-masked one).
+
+    Args:
+        fasta_source: Path to the reference FASTA file.
+
+    Returns:
+        The hex-encoded SHA-256 digest of the file's bytes.
+    """
+    h = hashlib.sha256()
+    with open(fasta_source, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_cpg_index_crc32(embedding: "GenomeMethylationEmbedding") -> str:
     """Compute a CRC32 checksum over the CpG site positions in an embedding.
 
     The checksum captures the exact column mapping of the sparse matrix:
