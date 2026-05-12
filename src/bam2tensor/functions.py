@@ -48,13 +48,15 @@ Example:
     >>> print(f"Extracted {result.matrix.shape[0]} reads, {result.matrix.nnz} data points")
 """
 
-from typing import NamedTuple
+from typing import Iterator, NamedTuple
 
+import multiprocessing as mp
 import numpy as np
 import scipy.sparse
 import pysam
 import bisect
 
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 from bam2tensor.embedding import GenomeMethylationEmbedding
 
@@ -334,6 +336,434 @@ def check_chromosome_overlap(
     )
 
 
+class _ChromExtractionResult(NamedTuple):
+    """Per-chromosome extraction output used by :func:`_extract_chromosome`.
+
+    Row indices are *local* (starting at 0). The caller applies the
+    cumulative offset across chromosomes so global row numbering matches
+    the order chromosomes appear in
+    ``GenomeMethylationEmbedding.cpg_sites_dict``.
+
+    Attributes:
+        rows: Local row indices (one entry per CpG observation).
+        cols: Global embedding column indices (already offset by the
+            chromosome's position in the embedding).
+        data: Methylation state values (1 / 0 / -1).
+        tlens: Per-read signed template lengths (one entry per row).
+        missing: ``True`` if the chromosome was not present in the BAM
+            file (the caller logs a verbose note in that case).
+    """
+
+    rows: list[int]
+    cols: list[int]
+    data: list[int]
+    tlens: list[int]
+    missing: bool
+
+
+class _ExtractionConfig(NamedTuple):
+    """Bundle of filter and decode settings shared across chromosomes.
+
+    Passed once to each worker process (via the pool initializer in the
+    parallel path) and inline in the sequential path. Keeps the
+    per-chromosome helper's signature small and gives type-checked
+    access to settings inside the worker.
+    """
+
+    pysam_threads: int
+    quality_limit: int
+    filter_non_converted: bool
+    non_converted_threshold: int
+    filter_em_overconversion: bool
+    em_overconversion_min_cpgs: int
+    debug: bool
+
+
+# Worker-process state set by :func:`_worker_init`. ProcessPoolExecutor
+# pickles the embedding to each worker once at startup, so per-chromosome
+# tasks only need to send the chromosome name across the IPC boundary.
+_WORKER_STATE: "tuple[str, GenomeMethylationEmbedding, _ExtractionConfig] | None" = None
+
+
+def _worker_init(
+    input_bam: str,
+    embedding: GenomeMethylationEmbedding,
+    config: _ExtractionConfig,
+) -> None:
+    """Initialize a parallel worker with shared extraction state."""
+    global _WORKER_STATE
+    _WORKER_STATE = (input_bam, embedding, config)
+
+
+def _worker_extract_chromosome(chrom: str) -> _ChromExtractionResult:
+    """Worker entrypoint: extract methylation calls for one chromosome.
+
+    Args:
+        chrom: Chromosome name to process.
+
+    Returns:
+        The per-chromosome extraction result.
+    """
+    assert _WORKER_STATE is not None
+    input_bam, embedding, config = _WORKER_STATE
+    return _extract_chromosome(
+        input_bam=input_bam,
+        chrom=chrom,
+        cpg_sites=embedding.cpg_sites_dict[chrom],
+        genome_methylation_embedding=embedding,
+        config=config,
+    )
+
+
+def _extract_chromosome(
+    input_bam: str,
+    chrom: str,
+    cpg_sites: list[int],
+    genome_methylation_embedding: GenomeMethylationEmbedding,
+    config: _ExtractionConfig,
+) -> _ChromExtractionResult:
+    """Extract methylation calls from one chromosome of a BAM file.
+
+    This is the per-chromosome unit of work used by both the sequential
+    (``threads=1``) and parallel (``threads>1``) paths of
+    :func:`extract_methylation_data_from_bam`. It opens its own pysam
+    handle so it is safe to call from a worker subprocess.
+
+    Args:
+        input_bam: Path to the indexed BAM file.
+        chrom: Chromosome name to process.
+        cpg_sites: Sorted 1-based CpG positions on ``chrom``.
+        genome_methylation_embedding: Embedding used for
+            ``genomic_position_to_embedding`` lookups.
+        config: Filter and decode settings; see :class:`_ExtractionConfig`.
+
+    Returns:
+        The per-chromosome extraction result; ``missing=True`` when
+        ``chrom`` is not in the BAM.
+    """
+    quality_limit = config.quality_limit
+    filter_non_converted = config.filter_non_converted
+    non_converted_threshold = config.non_converted_threshold
+    filter_em_overconversion = config.filter_em_overconversion
+    em_overconversion_min_cpgs = config.em_overconversion_min_cpgs
+    debug = config.debug
+
+    coo_row: list[int] = []
+    coo_col: list[int] = []
+    coo_data: list[int] = []
+    tlen_list: list[int] = []
+
+    bam = pysam.AlignmentFile(  # type: ignore # pylint: disable=no-member
+        input_bam, "rb", require_index=True, threads=config.pysam_threads
+    )
+
+    try:
+        iter_reads = bam.fetch(contig=chrom)
+    except ValueError:
+        bam.close()
+        return _ChromExtractionResult(
+            rows=coo_row,
+            cols=coo_col,
+            data=coo_data,
+            tlens=tlen_list,
+            missing=True,
+        )
+
+    if debug:
+        debug_read_name_to_row_number: dict = {}
+
+    read_number = 0
+
+    for aligned_segment in iter_reads:
+        if aligned_segment.mapping_quality < quality_limit:
+            continue
+
+        # Single bitwise check replaces 4 separate flag checks:
+        # duplicate (0x400), qcfail (0x200), secondary (0x100), supplementary (0x800)
+        if aligned_segment.flag & _SKIP_FLAGS:
+            continue
+
+        # Per-read buffers. We only flush these into the global
+        # coo_* arrays once the read passes all filters (including
+        # the post-CpG EM over-conversion filter).
+        read_cpg_cols: list[int] = []
+        read_cpg_data: list[int] = []
+
+        # ============================================================
+        # Bismark path: XM tag contains pre-resolved methylation calls.
+        # No strand filtering needed — Bismark already resolved strand
+        # and encoded calls as Z (methylated CpG) / z (unmethylated CpG).
+        # Both reads in a pair carry valid XM tags.
+        # ============================================================
+        if aligned_segment.has_tag("XM"):
+            xm_tag: str = aligned_segment.get_tag("XM")  # type: ignore[assignment]
+
+            # Non-converted filter (Bismark): XM tag already encodes
+            # retained non-CpG cytosines as H/X/U. Apply before any
+            # CpG work so we bail as early as possible.
+            if filter_non_converted:
+                if count_non_cpg_retained_xm(xm_tag) >= non_converted_threshold:
+                    continue
+
+            # Find CpG sites covered by this read
+            start_idx = bisect.bisect_left(
+                cpg_sites, aligned_segment.reference_start + 1
+            )
+            end_idx = bisect.bisect_right(
+                cpg_sites,
+                aligned_segment.reference_end,  # type: ignore[type-var]
+            )
+            if start_idx >= end_idx:
+                continue
+
+            cpgs_within_read_set = set(cpg_sites[start_idx:end_idx])
+
+            # Map read positions to reference positions, filter to CpG sites
+            this_segment_cpgs = [
+                e
+                for e in aligned_segment.get_aligned_pairs(matches_only=True)
+                if e[1] + 1 in cpgs_within_read_set
+            ]
+            if not this_segment_cpgs:
+                continue
+
+            if debug:
+                print(f"Query (Bismark): {aligned_segment.query_name}")
+
+            for query_pos, ref_pos in this_segment_cpgs:
+                # Bounds check: XM tag should match query length, but be defensive
+                if query_pos >= len(xm_tag):
+                    continue
+
+                xm_char = xm_tag[query_pos]
+                if xm_char == "Z":
+                    read_cpg_data.append(1)  # Methylated CpG
+                elif xm_char == "z":
+                    read_cpg_data.append(0)  # Unmethylated CpG
+                else:
+                    # Non-CpG context at a CpG site (shouldn't happen
+                    # normally, but possible with edge-case alignments)
+                    read_cpg_data.append(-1)
+
+                read_cpg_cols.append(
+                    genome_methylation_embedding.genomic_position_to_embedding(
+                        chrom,
+                        ref_pos + 1,
+                    )
+                )
+
+                if debug:
+                    print(f"\t{query_pos} {ref_pos} XM={xm_char}")
+
+            if not read_cpg_data:
+                continue
+
+            if filter_em_overconversion and is_em_overconversion_read(
+                read_cpg_data, em_overconversion_min_cpgs
+            ):
+                if debug:
+                    print("\tEM over-conversion filter: dropping read.")
+                continue
+
+            if debug:
+                read_key = aligned_segment.query_name + (  # type: ignore
+                    "_1" if aligned_segment.is_read1 else "_2"
+                )
+                assert read_key not in debug_read_name_to_row_number, "Read seen twice!"
+                debug_read_name_to_row_number[read_key] = read_number
+                print("************************************************\n")
+
+            coo_row.extend([read_number] * len(read_cpg_cols))
+            coo_col.extend(read_cpg_cols)
+            coo_data.extend(read_cpg_data)
+            tlen_list.append(aligned_segment.template_length)
+            read_number += 1
+
+            continue  # Skip the Biscuit/bwameth/gem3 path below
+
+        # ============================================================
+        # Biscuit / bwameth / gem3 path: use strand tags (YD / XB).
+        # Check the strand tag early (before CpG lookup) since ~50% of
+        # reads are on the daughter strand and can be skipped.
+        # ============================================================
+        bisulfite_parent_strand_is_reverse = None
+        if aligned_segment.has_tag("YD"):  # Biscuit / bwameth tag
+            yd_tag = aligned_segment.get_tag("YD")
+            if yd_tag == "f":  # Forward = C→T
+                # This read derives from OT/CTOT strand: C->T substitutions matter (C = methylated, T = unmethylated),
+                bisulfite_parent_strand_is_reverse = False
+            elif yd_tag == "r":  # Reverse = G→A
+                # This read derives from the OB/CTOB strand: G->A substitutions matter (G = methylated, A = unmethylated)
+                bisulfite_parent_strand_is_reverse = True
+        elif aligned_segment.has_tag("XB"):  # gem3 / blueprint tag
+            xb_tag = aligned_segment.get_tag("XB")  # XB:C = Forward / Reference was CG
+            if xb_tag == "C":
+                bisulfite_parent_strand_is_reverse = False
+            elif xb_tag == "G":  # XB:G = Reverse / Reference was GA
+                bisulfite_parent_strand_is_reverse = True
+
+        # We have paired-end reads; one half (the "parent strand") has the methylation data.
+        # The other half (the "daughter strand") was the complement created by PCR, which we don't care about.
+        if bisulfite_parent_strand_is_reverse != aligned_segment.is_reverse:
+            # Skip if we're not on the bisulfite-converted parent strand.
+            if debug:
+                print("\tNot on methylated strand, ignoring.")
+            continue
+
+        # Non-converted filter (Biscuit/bwameth/gem3): count retained
+        # non-CpG Cs (forward parent) or Gs (reverse parent) validated
+        # against the reference via the MD tag. Applied after the
+        # strand check so we don't waste work on daughter-strand reads.
+        if filter_non_converted:
+            if (
+                count_non_cpg_retained_reference(
+                    aligned_segment,
+                    bool(bisulfite_parent_strand_is_reverse),
+                )
+                >= non_converted_threshold
+            ):
+                if debug:
+                    print("\tNon-converted filter: dropping read.")
+                continue
+
+        # Use bisect to find CpGs covered by this read
+        # aligned_segment.reference_start is 0-based inclusive
+        # aligned_segment.reference_end is 0-based exclusive
+        # cpg_sites are 1-based
+
+        # We want CpGs where: read_start < cpg_pos <= read_end (in 1-based terms: read_start+1 <= cpg <= read_end)
+        start_idx = bisect.bisect_left(cpg_sites, aligned_segment.reference_start + 1)
+        end_idx = bisect.bisect_right(
+            cpg_sites,
+            aligned_segment.reference_end,  # type: ignore[type-var]
+        )
+
+        # If no CpGs in this read, skip
+        if start_idx >= end_idx:
+            continue
+
+        cpgs_within_read = cpg_sites[start_idx:end_idx]
+        cpgs_within_read_set = set(cpgs_within_read)
+
+        if debug:
+            print(f"Query: {aligned_segment.query_name}")
+            # Validity tests
+            assert not aligned_segment.is_unmapped
+            assert aligned_segment.is_supplementary is False
+
+            # Ensure alignment methylation tags exist
+            assert aligned_segment.has_tag("MD")  # Location of mismatches (methylation)
+            assert aligned_segment.has_tag("YD") or aligned_segment.has_tag(
+                "XB"
+            )  # Bisulfite strand tag (YD for Biscuit/bwameth, XB for gem3)
+
+        # TODO: We ignore paired/unpaired read status for now. Should we treat paired reads / overlapping reads differently?
+
+        # get_aligned_pairs returns a list of tuples of (read_pos, ref_pos)
+        # We filter this to only include the specific CpG sites from above
+        aligned_pairs = aligned_segment.get_aligned_pairs(matches_only=True)
+        this_segment_cpgs = [
+            e for e in aligned_pairs if e[1] + 1 in cpgs_within_read_set
+        ]
+
+        # If no CpGs covered (after filtering for matches only), skip
+        if not this_segment_cpgs:
+            continue
+
+        # OT (forward parent): methylation-informative base sits on the
+        #   top-strand C at ref_pos. BAM SEQ is reference-oriented, so
+        #   C = methylated, T = unmethylated.
+        # OB (reverse parent): the original bottom-strand C lives at
+        #   ref_pos + 1 (the G of the top-strand CG). After the aligner
+        #   reverse-complements into reference orientation for BAM
+        #   storage, that base reads G = methylated, A = unmethylated.
+        #   At ref_pos itself, BAM always shows C (the unaffected
+        #   bottom-strand G reverse-complemented), which is why reading
+        #   ref_pos on OB reads collapses every CpG to "methylated".
+        query_sequence = aligned_segment.query_sequence
+        if bisulfite_parent_strand_is_reverse:
+            methylated_base, unmethylated_base = "G", "A"
+            # Indels at the CpG boundary mean ref_pos + 1 isn't always
+            # query_pos + 1 — go through a ref -> query map.
+            ref_to_query: dict[int, int] = {ref: q for q, ref in aligned_pairs}
+        else:
+            methylated_base, unmethylated_base = "C", "T"
+            ref_to_query = {}
+
+        for query_pos, ref_pos in this_segment_cpgs:
+            read_cpg_cols.append(
+                genome_methylation_embedding.genomic_position_to_embedding(
+                    chrom,
+                    ref_pos + 1,
+                )
+            )
+
+            if bisulfite_parent_strand_is_reverse:
+                target_query_pos = ref_to_query.get(ref_pos + 1)
+                if target_query_pos is None:
+                    read_cpg_data.append(-1)
+                    if debug:
+                        print(f"\t{query_pos} {ref_pos} [Indel at OB target]")
+                    continue
+                query_base = query_sequence[target_query_pos]  # type: ignore[index]
+            else:
+                query_base = query_sequence[query_pos]  # type: ignore[index]
+
+            if query_base == methylated_base:
+                read_cpg_data.append(1)
+                if debug:
+                    print(
+                        f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Methylated]"
+                    )
+            elif query_base == unmethylated_base:
+                read_cpg_data.append(0)
+                if debug:
+                    print(
+                        f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Unmethylated]"
+                    )
+            else:
+                read_cpg_data.append(-1)
+                if debug:
+                    print(
+                        f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Unknown! SNV? Indel?]"
+                    )
+
+        if filter_em_overconversion and is_em_overconversion_read(
+            read_cpg_data, em_overconversion_min_cpgs
+        ):
+            if debug:
+                print("\tEM over-conversion filter: dropping read.")
+            continue
+
+        if debug:
+            # Ensure each read is only seen once
+            assert (
+                aligned_segment.query_name not in debug_read_name_to_row_number
+            ), "Read seen twice!"
+            debug_read_name_to_row_number[
+                aligned_segment.query_name  # type: ignore
+                + ("_1" if aligned_segment.is_read1 else "_2")
+            ] = read_number
+
+        coo_row.extend([read_number] * len(read_cpg_cols))
+        coo_col.extend(read_cpg_cols)
+        coo_data.extend(read_cpg_data)
+        tlen_list.append(aligned_segment.template_length)
+        read_number += 1
+
+        if debug:
+            print("************************************************\n")
+
+    bam.close()
+    return _ChromExtractionResult(
+        rows=coo_row,
+        cols=coo_col,
+        data=coo_data,
+        tlens=tlen_list,
+        missing=False,
+    )
+
+
 def extract_methylation_data_from_bam(
     input_bam: str,
     genome_methylation_embedding: GenomeMethylationEmbedding,
@@ -342,6 +772,7 @@ def extract_methylation_data_from_bam(
     non_converted_threshold: int = 3,
     filter_em_overconversion: bool = False,
     em_overconversion_min_cpgs: int = 3,
+    threads: int = 1,
     verbose: bool = False,
     debug: bool = False,
 ) -> ExtractionResult:
@@ -410,6 +841,16 @@ def extract_methylation_data_from_bam(
             before the over-conversion filter will drop a read. Matches
             the regime in Loyfer et al. Fig. 1C where the EM-seq
             artifact is clearly separable from WGBS.
+        threads: Number of worker processes to use, one chromosome per
+            worker. Default 1 (in-process, no IPC overhead). Values
+            above 1 fan out per-chromosome extraction across worker
+            processes; output is bitwise-identical to ``threads=1``
+            because chromosomes are processed in
+            ``cpg_sites_dict`` order and per-worker row indices are
+            offset by the cumulative read count from preceding
+            chromosomes. Recommended: leave at 1 for small BAMs (worker
+            startup dominates); set to the number of physical cores
+            for whole-genome WGBS BAMs.
         verbose: If True, display a progress bar and print the total read
             count. Useful for monitoring progress on large files.
         debug: If True, enable extensive validation and debug output.
@@ -434,6 +875,7 @@ def extract_methylation_data_from_bam(
     Raises:
         FileNotFoundError: If the BAM file index (.bam.bai) is missing.
             The BAM file must be indexed with `samtools index`.
+        ValueError: If ``threads`` is less than 1.
 
     Example:
         >>> # xdoctest: +SKIP
@@ -473,353 +915,108 @@ def extract_methylation_data_from_bam(
         GenomeMethylationEmbedding: For creating the genome embedding.
         scipy.sparse.coo_matrix: Documentation on the output format.
     """
+    if threads < 1:
+        raise ValueError(f"threads must be >= 1, got {threads}")
+
+    # Open once on the parent side to surface a clean error if the index
+    # is missing, to validate chromosome-name overlap, and to read the
+    # mapped-read count for verbose output. Workers open their own
+    # handles. Sequential mode passes pysam_threads=4 (the historical
+    # setting) to its handle; parallel mode uses 1 per worker since each
+    # worker is its own process. The parent handle only touches metadata
+    # so threads=1 here is sufficient.
     try:
         input_bam_object = pysam.AlignmentFile(  # type: ignore # pylint: disable=no-member
-            input_bam, "rb", require_index=True, threads=4
+            input_bam, "rb", require_index=True, threads=1
         )
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"Index missing for bam file?: {input_bam}") from exc
 
-    # Check for chromosome name mismatches (e.g. chr1 vs 1)
     check_chromosome_overlap(
         bam_references=input_bam_object.references,
         embedding_chromosomes=list(genome_methylation_embedding.cpg_sites_dict.keys()),
     )
-
     if verbose:
         print(f"\tTotal reads: {input_bam_object.mapped:,}\n")
-    if debug:
-        debug_read_name_to_row_number = {}
+    input_bam_object.close()
 
-    # Temporary storage for loading into a COO matrix
-    # For a COO, we want three lists:
-    # row: the read number (we'll store a read name -> ID dict perhaps?)
-    # column: cpg #
-    # data: methylation state (1 [methylated], 0 [unmethylated], and -1 [no data/snv/indel])
-    read_number = 0
+    config = _ExtractionConfig(
+        pysam_threads=4 if threads == 1 else 1,
+        quality_limit=quality_limit,
+        filter_non_converted=filter_non_converted,
+        non_converted_threshold=non_converted_threshold,
+        filter_em_overconversion=filter_em_overconversion,
+        em_overconversion_min_cpgs=em_overconversion_min_cpgs,
+        debug=debug,
+    )
 
-    coo_row = []  # Read number
-    coo_col = []  # CpG number (embedding)
-    coo_data = []  # Methylation state
-    tlen_list: list[int] = []  # Template length (TLEN) per read
+    chrom_items = list(genome_methylation_embedding.cpg_sites_dict.items())
 
-    # This is slow, but we only run it once and store the results for later
-    for chrom, cpg_sites in tqdm(
-        genome_methylation_embedding.cpg_sites_dict.items(),
-        disable=not verbose,
+    def _iter_chrom_results() -> Iterator[tuple[str, _ChromExtractionResult]]:
+        if threads == 1:
+            for chrom, cpg_sites in chrom_items:
+                yield chrom, _extract_chromosome(
+                    input_bam=input_bam,
+                    chrom=chrom,
+                    cpg_sites=cpg_sites,
+                    genome_methylation_embedding=genome_methylation_embedding,
+                    config=config,
+                )
+            return
+        # Spawn is the safe start method on macOS (fork + pysam can hang
+        # because pysam holds C-level locks across the fork). Spawn is
+        # also the default on macOS for Python 3.8+, but be explicit.
+        ctx = mp.get_context("spawn")
+        chrom_names = [chrom for chrom, _ in chrom_items]
+        with ProcessPoolExecutor(
+            max_workers=threads,
+            mp_context=ctx,
+            initializer=_worker_init,
+            initargs=(input_bam, genome_methylation_embedding, config),
+        ) as executor:
+            # map() preserves submission order — required so we can apply
+            # cumulative row offsets that match the sequential path.
+            yield from zip(
+                chrom_names, executor.map(_worker_extract_chromosome, chrom_names)
+            )
+
+    coo_row: list[int] = []
+    coo_col: list[int] = []
+    coo_data: list[int] = []
+    tlen_list: list[int] = []
+    row_offset = 0
+
+    for chrom, chrom_result in tqdm(
+        _iter_chrom_results(), total=len(chrom_items), disable=not verbose
     ):
-        # Ensure this chromosome exists in the BAM file
-        try:
-            iter_reads = input_bam_object.fetch(contig=chrom)
-        except ValueError:
-            # Chromosome not in BAM
+        if chrom_result.missing:
             if verbose:
                 tqdm.write(f"Chromosome {chrom} not found in BAM file, skipping.")
             continue
-
-        for aligned_segment in iter_reads:
-            if aligned_segment.mapping_quality < quality_limit:
-                continue
-
-            # Single bitwise check replaces 4 separate flag checks:
-            # duplicate (0x400), qcfail (0x200), secondary (0x100), supplementary (0x800)
-            if aligned_segment.flag & _SKIP_FLAGS:
-                continue
-
-            # Per-read buffers. We only flush these into the global
-            # coo_* arrays once the read passes all filters (including
-            # the post-CpG EM over-conversion filter).
-            read_cpg_cols: list[int] = []
-            read_cpg_data: list[int] = []
-
-            # ============================================================
-            # Bismark path: XM tag contains pre-resolved methylation calls.
-            # No strand filtering needed — Bismark already resolved strand
-            # and encoded calls as Z (methylated CpG) / z (unmethylated CpG).
-            # Both reads in a pair carry valid XM tags.
-            # ============================================================
-            if aligned_segment.has_tag("XM"):
-                xm_tag: str = aligned_segment.get_tag("XM")  # type: ignore[assignment]
-
-                # Non-converted filter (Bismark): XM tag already encodes
-                # retained non-CpG cytosines as H/X/U. Apply before any
-                # CpG work so we bail as early as possible.
-                if filter_non_converted:
-                    if count_non_cpg_retained_xm(xm_tag) >= non_converted_threshold:
-                        continue
-
-                # Find CpG sites covered by this read
-                start_idx = bisect.bisect_left(
-                    cpg_sites, aligned_segment.reference_start + 1
-                )
-                end_idx = bisect.bisect_right(cpg_sites, aligned_segment.reference_end)
-                if start_idx >= end_idx:
-                    continue
-
-                cpgs_within_read_set = set(cpg_sites[start_idx:end_idx])
-
-                # Map read positions to reference positions, filter to CpG sites
-                this_segment_cpgs = [
-                    e
-                    for e in aligned_segment.get_aligned_pairs(matches_only=True)
-                    if e[1] + 1 in cpgs_within_read_set
-                ]
-                if not this_segment_cpgs:
-                    continue
-
-                if debug:
-                    print(f"Query (Bismark): {aligned_segment.query_name}")
-
-                for query_pos, ref_pos in this_segment_cpgs:
-                    # Bounds check: XM tag should match query length, but be defensive
-                    if query_pos >= len(xm_tag):
-                        continue
-
-                    xm_char = xm_tag[query_pos]
-                    if xm_char == "Z":
-                        read_cpg_data.append(1)  # Methylated CpG
-                    elif xm_char == "z":
-                        read_cpg_data.append(0)  # Unmethylated CpG
-                    else:
-                        # Non-CpG context at a CpG site (shouldn't happen
-                        # normally, but possible with edge-case alignments)
-                        read_cpg_data.append(-1)
-
-                    read_cpg_cols.append(
-                        genome_methylation_embedding.genomic_position_to_embedding(
-                            chrom,
-                            ref_pos + 1,
-                        )
-                    )
-
-                    if debug:
-                        print(f"\t{query_pos} {ref_pos} XM={xm_char}")
-
-                if not read_cpg_data:
-                    continue
-
-                if filter_em_overconversion and is_em_overconversion_read(
-                    read_cpg_data, em_overconversion_min_cpgs
-                ):
-                    if debug:
-                        print("\tEM over-conversion filter: dropping read.")
-                    continue
-
-                if debug:
-                    read_key = aligned_segment.query_name + (  # type: ignore
-                        "_1" if aligned_segment.is_read1 else "_2"
-                    )
-                    assert (
-                        read_key not in debug_read_name_to_row_number
-                    ), "Read seen twice!"
-                    debug_read_name_to_row_number[read_key] = read_number
-                    print("************************************************\n")
-
-                coo_row.extend([read_number] * len(read_cpg_cols))
-                coo_col.extend(read_cpg_cols)
-                coo_data.extend(read_cpg_data)
-                tlen_list.append(aligned_segment.template_length)
-                read_number += 1
-
-                continue  # Skip the Biscuit/bwameth/gem3 path below
-
-            # ============================================================
-            # Biscuit / bwameth / gem3 path: use strand tags (YD / XB).
-            # Check the strand tag early (before CpG lookup) since ~50% of
-            # reads are on the daughter strand and can be skipped.
-            # ============================================================
-            bisulfite_parent_strand_is_reverse = None
-            if aligned_segment.has_tag("YD"):  # Biscuit / bwameth tag
-                yd_tag = aligned_segment.get_tag("YD")
-                if yd_tag == "f":  # Forward = C→T
-                    # This read derives from OT/CTOT strand: C->T substitutions matter (C = methylated, T = unmethylated),
-                    bisulfite_parent_strand_is_reverse = False
-                elif yd_tag == "r":  # Reverse = G→A
-                    # This read derives from the OB/CTOB strand: G->A substitutions matter (G = methylated, A = unmethylated)
-                    bisulfite_parent_strand_is_reverse = True
-            elif aligned_segment.has_tag("XB"):  # gem3 / blueprint tag
-                xb_tag = aligned_segment.get_tag(
-                    "XB"
-                )  # XB:C = Forward / Reference was CG
-                if xb_tag == "C":
-                    bisulfite_parent_strand_is_reverse = False
-                elif xb_tag == "G":  # XB:G = Reverse / Reference was GA
-                    bisulfite_parent_strand_is_reverse = True
-
-            # We have paired-end reads; one half (the "parent strand") has the methylation data.
-            # The other half (the "daughter strand") was the complement created by PCR, which we don't care about.
-            if bisulfite_parent_strand_is_reverse != aligned_segment.is_reverse:
-                # Skip if we're not on the bisulfite-converted parent strand.
-                if debug:
-                    print("\tNot on methylated strand, ignoring.")
-                continue
-
-            # Non-converted filter (Biscuit/bwameth/gem3): count retained
-            # non-CpG Cs (forward parent) or Gs (reverse parent) validated
-            # against the reference via the MD tag. Applied after the
-            # strand check so we don't waste work on daughter-strand reads.
-            if filter_non_converted:
-                if (
-                    count_non_cpg_retained_reference(
-                        aligned_segment,
-                        bool(bisulfite_parent_strand_is_reverse),
-                    )
-                    >= non_converted_threshold
-                ):
-                    if debug:
-                        print("\tNon-converted filter: dropping read.")
-                    continue
-
-            # Use bisect to find CpGs covered by this read
-            # aligned_segment.reference_start is 0-based inclusive
-            # aligned_segment.reference_end is 0-based exclusive
-            # cpg_sites are 1-based
-
-            # We want CpGs where: read_start < cpg_pos <= read_end (in 1-based terms: read_start+1 <= cpg <= read_end)
-            start_idx = bisect.bisect_left(
-                cpg_sites, aligned_segment.reference_start + 1
-            )
-            end_idx = bisect.bisect_right(cpg_sites, aligned_segment.reference_end)
-
-            # If no CpGs in this read, skip
-            if start_idx >= end_idx:
-                continue
-
-            cpgs_within_read = cpg_sites[start_idx:end_idx]
-            cpgs_within_read_set = set(cpgs_within_read)
-
-            if debug:
-                print(f"Query: {aligned_segment.query_name}")
-                # Validity tests
-                assert not aligned_segment.is_unmapped
-                assert aligned_segment.is_supplementary is False
-
-                # Ensure alignment methylation tags exist
-                assert aligned_segment.has_tag(
-                    "MD"
-                )  # Location of mismatches (methylation)
-                assert aligned_segment.has_tag("YD") or aligned_segment.has_tag(
-                    "XB"
-                )  # Bisulfite strand tag (YD for Biscuit/bwameth, XB for gem3)
-
-            # TODO: We ignore paired/unpaired read status for now. Should we treat paired reads / overlapping reads differently?
-
-            # get_aligned_pairs returns a list of tuples of (read_pos, ref_pos)
-            # We filter this to only include the specific CpG sites from above
-            aligned_pairs = aligned_segment.get_aligned_pairs(matches_only=True)
-            this_segment_cpgs = [
-                e for e in aligned_pairs if e[1] + 1 in cpgs_within_read_set
-            ]
-
-            # If no CpGs covered (after filtering for matches only), skip
-            if not this_segment_cpgs:
-                continue
-
-            # OT (forward parent): methylation-informative base sits on the
-            #   top-strand C at ref_pos. BAM SEQ is reference-oriented, so
-            #   C = methylated, T = unmethylated.
-            # OB (reverse parent): the original bottom-strand C lives at
-            #   ref_pos + 1 (the G of the top-strand CG). After the aligner
-            #   reverse-complements into reference orientation for BAM
-            #   storage, that base reads G = methylated, A = unmethylated.
-            #   At ref_pos itself, BAM always shows C (the unaffected
-            #   bottom-strand G reverse-complemented), which is why reading
-            #   ref_pos on OB reads collapses every CpG to "methylated".
-            query_sequence = aligned_segment.query_sequence
-            if bisulfite_parent_strand_is_reverse:
-                methylated_base, unmethylated_base = "G", "A"
-                # Indels at the CpG boundary mean ref_pos + 1 isn't always
-                # query_pos + 1 — go through a ref -> query map.
-                ref_to_query: dict[int, int] = {ref: q for q, ref in aligned_pairs}
-            else:
-                methylated_base, unmethylated_base = "C", "T"
-                ref_to_query = {}
-
-            for query_pos, ref_pos in this_segment_cpgs:
-                read_cpg_cols.append(
-                    genome_methylation_embedding.genomic_position_to_embedding(
-                        chrom,
-                        ref_pos + 1,
-                    )
-                )
-
-                if bisulfite_parent_strand_is_reverse:
-                    target_query_pos = ref_to_query.get(ref_pos + 1)
-                    if target_query_pos is None:
-                        read_cpg_data.append(-1)
-                        if debug:
-                            print(f"\t{query_pos} {ref_pos} [Indel at OB target]")
-                        continue
-                    query_base = query_sequence[target_query_pos]  # type: ignore[index]
-                else:
-                    query_base = query_sequence[query_pos]  # type: ignore[index]
-
-                if query_base == methylated_base:
-                    read_cpg_data.append(1)
-                    if debug:
-                        print(
-                            f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Methylated]"
-                        )
-                elif query_base == unmethylated_base:
-                    read_cpg_data.append(0)
-                    if debug:
-                        print(
-                            f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Unmethylated]"
-                        )
-                else:
-                    read_cpg_data.append(-1)
-                    if debug:
-                        print(
-                            f"\t{query_pos} {ref_pos} {methylated_base}->{query_base} [Unknown! SNV? Indel?]"
-                        )
-
-            if filter_em_overconversion and is_em_overconversion_read(
-                read_cpg_data, em_overconversion_min_cpgs
-            ):
-                if debug:
-                    print("\tEM over-conversion filter: dropping read.")
-                continue
-
-            if debug:
-                # Ensure each read is only seen once
-                assert (
-                    aligned_segment.query_name not in debug_read_name_to_row_number
-                ), "Read seen twice!"
-                debug_read_name_to_row_number[
-                    aligned_segment.query_name  # type: ignore
-                    + ("_1" if aligned_segment.is_read1 else "_2")
-                ] = read_number
-
-            coo_row.extend([read_number] * len(read_cpg_cols))
-            coo_col.extend(read_cpg_cols)
-            coo_data.extend(read_cpg_data)
-            tlen_list.append(aligned_segment.template_length)
-            read_number += 1
-
-            if debug:
-                print("************************************************\n")
-
-    ## IIRC there's still a critical edge here, where sometimes we raise ValueError('row index exceeds matrix dimensions')
+        if not chrom_result.rows:
+            continue
+        coo_row.extend(r + row_offset for r in chrom_result.rows)
+        coo_col.extend(chrom_result.cols)
+        coo_data.extend(chrom_result.data)
+        tlen_list.extend(chrom_result.tlens)
+        row_offset += len(chrom_result.tlens)
 
     if debug:
         print("Debug info for coo_matrix dimensions:")
         print(f"\tcoo_row: {len(coo_row):,}")
-        print(f"\tcoo row max: {max(coo_row):,}")
+        if coo_row:
+            print(f"\tcoo row max: {max(coo_row):,}")
         print(f"\tcoo_col: {len(coo_col):,}")
-        print(f"\tcoo col max: {max(coo_col):,}")
+        if coo_col:
+            print(f"\tcoo col max: {max(coo_col):,}")
         print(f"\tcoo_data: {len(coo_data):,}")
-        print(f"\tlen(read_name_to_row_number): {len(debug_read_name_to_row_number):,}")
         print(f"\ttotal_cpg_sites: {genome_methylation_embedding.total_cpg_sites:,}")
 
-    # Generate the sparse matrix
     sparse_matrix = scipy.sparse.coo_matrix(
         (coo_data, (coo_row, coo_col)),
-        shape=(read_number, genome_methylation_embedding.total_cpg_sites),
+        shape=(row_offset, genome_methylation_embedding.total_cpg_sites),
     )
 
-    # Validate a dimension of the coo_matrix, which should be:
-    #   Number of rows = number of reads that pass our filters
-    #   Number of columns = number of CpG sites
     assert sparse_matrix.shape[1] == genome_methylation_embedding.total_cpg_sites
 
     tlen_array = np.array(tlen_list, dtype=np.int32)

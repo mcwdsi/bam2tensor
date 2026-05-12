@@ -266,6 +266,18 @@ def validate_input_output(
     default=3,
     type=int,
 )
+@click.option(
+    "--threads",
+    help=(
+        "Number of worker processes for per-chromosome extraction "
+        "(default = 1). With threads > 1, chromosomes are fanned out "
+        "across worker processes. Output is bitwise-identical to the "
+        "single-threaded path. Recommended: number of physical cores "
+        "for whole-genome WGBS/EM-seq BAMs."
+    ),
+    default=1,
+    type=int,
+)
 @click.option("--verbose", help="Verbose output.", is_flag=True)
 @click.option("--skip-cache", help="De-novo generate CpG sites (slow).", is_flag=True)
 @click.option(
@@ -304,6 +316,7 @@ def main(
     non_converted_threshold: int,
     filter_em_overconversion: bool,
     em_overconversion_min_cpgs: int,
+    threads: int,
     verbose: bool,
     skip_cache: bool,
     debug: bool,
@@ -352,6 +365,8 @@ def main(
             fragment-level over-conversion (Loyfer et al. 2026).
         em_overconversion_min_cpgs: Minimum covered CpG count required
             before the over-conversion filter will drop a read.
+        threads: Number of worker processes for per-chromosome
+            extraction. Default 1.
         verbose: If True, print detailed progress information.
         skip_cache: If True, regenerate the CpG site index even if a cache
             file exists.
@@ -434,6 +449,8 @@ def main(
     print(f"  Reference:     {reference_fasta}")
     print(f"  Chromosomes:   {chrom_display}")
     print(f"  Quality limit: MAPQ >= {quality_limit}")
+    if threads > 1:
+        print(f"  Threads:       {threads} worker process(es)")
     if filter_non_converted:
         print(
             f"  Filters:       non-converted reads (>= "
@@ -514,6 +531,7 @@ def main(
                 non_converted_threshold=non_converted_threshold,
                 filter_em_overconversion=filter_em_overconversion,
                 em_overconversion_min_cpgs=em_overconversion_min_cpgs,
+                threads=threads,
                 verbose=verbose,
                 debug=debug,
             )

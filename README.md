@@ -244,6 +244,13 @@ Options:
                                   Minimum covered CpG count required before
                                   the EM over-conversion filter will drop a
                                   read (default = 3).
+  --threads INTEGER               Number of worker processes for per-
+                                  chromosome extraction (default = 1). With
+                                  threads > 1, chromosomes are fanned out
+                                  across worker processes. Output is bitwise-
+                                  identical to the single-threaded path.
+                                  Recommended: number of physical cores for
+                                  whole-genome WGBS/EM-seq BAMs.
   --verbose                       Verbose output.
   --skip-cache                    De-novo generate CpG sites (slow).
   --debug                         Debug mode (extensive validity checking +
@@ -273,6 +280,7 @@ Options:
 | `--non-converted-threshold` | Threshold for the non-converted filter. Default is 3. |
 | `--filter-em-overconversion` | Drop EM-seq reads whose covered CpGs are all unmethylated and cover ≥ `--em-overconversion-min-cpgs` sites. See [Filtering Conversion Errors](#filtering-conversion-errors). |
 | `--em-overconversion-min-cpgs` | Minimum covered CpG count before the EM over-conversion filter will drop a read. Default is 3. |
+| `--threads` | Number of worker processes for per-chromosome extraction. Default is 1 (single process). Output is bitwise-identical regardless of the value. See [Performance Tips](#performance-tips). |
 | `--verbose` | Enable detailed progress output including per-chromosome progress bars. |
 | `--skip-cache` | Force regeneration of CpG site cache. Useful if you've modified the reference or chromosome list. |
 | `--debug` | Enable extensive validation and debug output. Slower but useful for troubleshooting. |
@@ -578,21 +586,63 @@ These tags indicate which strand the original bisulfite/EM-seq-converted DNA cam
 
 1. **Use the cache**: The first run on a new genome builds a CpG site index, which is cached. Subsequent runs are much faster.
 
-2. **Process in parallel**: bam2tensor processes one BAM at a time, but you can run multiple instances in parallel on different BAM files:
+2. **Use `--threads` to fan out per-chromosome work**: For whole-genome BAMs, set `--threads` to the number of physical cores. Each worker handles one chromosome at a time; output is bitwise-identical to `--threads 1`.
+
    ```bash
-   # Using GNU parallel
-   find /data/bams -name "*.bam" | parallel -j 4 \
-       bam2tensor --input-path {} --reference-fasta ref.fa --genome-name hg38
+   bam2tensor --input-path sample.bam --reference-fasta ref.fa \
+       --genome-name hg38 --threads 8
    ```
 
-3. **Ensure BAM files are indexed**: Each BAM file requires a corresponding `.bam.bai` index file. Create with:
+   Notes and trade-offs:
+   - **Default is `--threads 1`.** Worker startup with `spawn` (the safe start method on macOS) pickles the embedding to each worker; for hg38 that's a few seconds. Don't enable for small targeted-region BAMs — the startup cost dominates.
+   - **Memory scales with `--threads`.** Each worker holds its chromosome's row/col/data buffers and a copy of the genome embedding. As a rough rule, budget `1.5 GB / GB BAM` for the first worker and add ~1 GB per additional worker.
+   - **Diminishing returns past ~chromosome-count workers.** For hg38 (24 chromosomes) there's no point setting `--threads` above 24. In practice ~8 cores already captures most of the speedup because the largest chromosomes (chr1, chr2) dominate wall time.
+   - **Hot loop is Python, not pysam.** Using OS-level threads (e.g. `OMP_NUM_THREADS`) won't help — the GIL holds the per-read CIGAR walk. `--threads` is process-level parallelism via `concurrent.futures.ProcessPoolExecutor`.
+
+3. **Parallelize across BAMs too**: If you have many BAM files, you can run multiple instances of `bam2tensor` simultaneously, each with its own `--threads`:
+
+   ```bash
+   # Using GNU parallel: 4 BAMs in flight, each using 2 workers
+   find /data/bams -name "*.bam" | parallel -j 4 \
+       bam2tensor --input-path {} --reference-fasta ref.fa --genome-name hg38 --threads 2
+   ```
+
+   On HPC schedulers this is usually cleaner as one array task per BAM with `--cpus-per-task` set to match `--threads`; see [SLURM example](#slurm-array-template) below.
+
+4. **Ensure BAM files are indexed**: Each BAM file requires a corresponding `.bam.bai` index file. Create with:
    ```bash
    samtools index sample.bam
    ```
 
-4. **Use SSDs**: Both reading BAM files and writing output benefit from fast storage.
+5. **Use SSDs**: Both reading BAM files and writing output benefit from fast storage.
 
-5. **Memory considerations**: Memory usage scales with the number of CpG sites (columns) rather than reads. For human genomes (~28M CpG sites), expect moderate memory usage.
+6. **Memory considerations**: Single-threaded memory usage scales with the number of reads (~1.5 GB per GB of input BAM). With `--threads > 1`, add ~1 GB per worker for the embedding copy plus per-chromosome buffers.
+
+### SLURM array template
+
+For whole-genome WGBS/EM-seq cohorts on SLURM clusters, the recommended starting point is:
+
+```sbatch
+#!/bin/bash
+#SBATCH --job-name=bam2tensor
+#SBATCH --cpus-per-task=8          # workers + a couple of cores for pysam I/O
+#SBATCH --mem=96G                  # 1.5 GB / GB BAM + ~1 GB per worker
+#SBATCH --time=02:00:00            # ≤ 60 GB BAMs at --threads 8
+#SBATCH --array=1-N%50             # cluster QOS will cap parallelism
+
+set -euo pipefail
+BAM=$(sed -n "${SLURM_ARRAY_TASK_ID}p" manifest.txt)
+bam2tensor \
+    --input-path "$BAM" \
+    --reference-fasta hg38.fa \
+    --genome-name hg38 \
+    --output-dir out/ \
+    --quality-limit 20 \
+    --filter-non-converted \
+    --threads 8
+```
+
+For older versions of bam2tensor (pre-2.8, no `--threads`), use `--cpus-per-task=2` and expect ~4 h wall time on 60 GB BAMs.
 
 ## API Reference
 
@@ -631,6 +681,7 @@ extract_methylation_data_from_bam(
     non_converted_threshold: int = 3,                  # Threshold for the above filter
     filter_em_overconversion: bool = False,            # Drop EM-seq fragment-level over-conversion reads
     em_overconversion_min_cpgs: int = 3,               # Min CpGs before applying the above filter
+    threads: int = 1,                                  # Worker processes for per-chromosome extraction
     verbose: bool = False,                             # Enable verbose output
     debug: bool = False                                # Enable debug output
 ) -> ExtractionResult

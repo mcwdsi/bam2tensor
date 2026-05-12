@@ -40,7 +40,7 @@ uv run mypy src
 
 ```
 src/bam2tensor/
-  __init__.py      # Package version (2.5)
+  __init__.py      # Package version (2.8)
   __main__.py      # Click CLI entry point (bam2tensor command)
   inspect.py       # Inspect CLI entry point (bam2tensor-inspect command)
   embedding.py     # GenomeMethylationEmbedding class (FASTA parsing, CpG indexing)
@@ -155,6 +155,26 @@ uv run bam2tensor --input-path input.bam --download-reference hg38
 uv run bam2tensor-inspect output.methylation.npz
 ```
 
+### Parallel extraction (`--threads`)
+
+The per-chromosome extraction loop is parallelizable. `--threads N` fans
+out one chromosome per worker via `concurrent.futures.ProcessPoolExecutor`
+with `multiprocessing.get_context("spawn")` (safe for pysam on macOS).
+Output is bitwise-identical to `--threads 1` because chromosomes are
+collected in `cpg_sites_dict` order and per-worker row indices are
+offset by the cumulative read count from preceding chromosomes.
+
+When recommending CPU counts:
+- Small (region-targeted) BAMs: stay at `--threads 1` — spawn-pickling
+  the embedding to each worker dominates for sub-minute jobs.
+- Whole-genome WGBS/EM-seq BAMs (≥ 10 GB): `--threads 8` is a good
+  default; diminishing returns past `--threads 24` since chr1/chr2
+  dominate wall time and that's the longest pole.
+- Memory budget: ~1.5 GB per GB of input BAM, plus ~1 GB per worker
+  for the embedding copy and per-chromosome buffers.
+- OS-level threads (`OMP_NUM_THREADS`, `threading`) do NOT help — the
+  hot loop is Python and GIL-bound. Always use `--threads`.
+
 ### Reference Genome Downloads
 - Downloaded references are cached in `~/.cache/bam2tensor/`
 - Available genomes: hg38, hg19, mm10, T2T-CHM13
@@ -182,3 +202,22 @@ When working on this codebase as an AI coding agent:
 - **Do not modify** `noxfile.py` (excluded from ruff checks)
 - **New CLI options**: Add to both Click decorators and the `main()` function signature in `__main__.py`
 - **Cache files**: `.cache.json.gz` files are written to the current working directory
+
+### Using bam2tensor efficiently when invoked from an agent
+
+If a user asks you to run `bam2tensor` on a sample, default to:
+
+- **Whole-genome BAM** (≥ 10 GB): `--threads 8` (or `os.cpu_count() // 2`).
+  Single-threaded extraction wastes most of a modern node's cores; the
+  parallel path is bitwise-equivalent.
+- **Small/region BAM** (< 1 GB): leave `--threads 1`. Worker spawn cost
+  exceeds the savings.
+- **Cohort run on SLURM**: prefer one array task per BAM with
+  `--cpus-per-task=8` and `--threads 8`. See the SLURM template in
+  README.md. Don't `srun` a single huge job — array tasks parallelize
+  across BAMs and let the scheduler recover from individual failures.
+- **`--filter-non-converted` is not replayable from the `.npz`**: if a
+  downstream consumer might need conversion-corrected output, enable
+  the flag at extraction time (don't skip it expecting to filter later).
+- **Re-extracting the same BAM**: check for an existing `.methylation.npz`
+  first — `--overwrite` is off by default for a reason.
