@@ -17,3 +17,12 @@ TEST_BAM_INDEX = str(TESTS_DIR / "test.bam.bai")
 
 # chr1, chr2, chr3 (and an extra ``chrIGNORED`` record), 700 kb each.
 TEST_FASTA = str(TESTS_DIR / "test_fasta.fa")
+
+# Real aligner output for the same 557 read pairs (a subset of the nf-core
+# test datasets; see tests/data/sarscov2/README.md): one BAM from Bismark, one
+# from bwa-meth, and their SARS-CoV-2 reference.
+SARSCOV2_DIR = TESTS_DIR / "data" / "sarscov2"
+SARSCOV2_FASTA = str(SARSCOV2_DIR / "genome.fasta")
+SARSCOV2_CHROMOSOME = "MT192765.1"
+SARSCOV2_BISMARK_BAM = str(SARSCOV2_DIR / "bismark.bam")
+SARSCOV2_BWAMETH_BAM = str(SARSCOV2_DIR / "bwameth.bam")

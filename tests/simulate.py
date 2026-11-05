@@ -14,6 +14,14 @@ yields a single row, which exercises very little. This module fills the gap by
 Tests can therefore check the extractor's output value-for-value against what
 was simulated, instead of against numbers copied from a previous run.
 
+Both mates of a pair are copies of the same converted molecule, so they agree
+wherever they overlap — except where a simulated sequencing error says
+otherwise. Errors are drawn independently for each mate and come in two kinds:
+a base that is neither the methylated nor the unmethylated one (the CpG reads
+as "no data"), and a miscall that flips methylated to unmethylated or back
+(the mate reports the wrong state, which only shows where the other mate
+covers the same CpG and disagrees).
+
 Conventions (all coordinates 0-based unless stated otherwise):
 
 * A fragment from the original **top** strand (OT) yields read 1 aligned
@@ -49,7 +57,15 @@ _P_FULLY_UNMETHYLATED_FRAGMENT = 0.10
 _P_NON_CONVERTED_FRAGMENT = 0.06
 _P_DUPLICATE = 0.05
 _P_LOW_MAPQ = 0.10
+_P_LOW_MAPQ_ONE_MATE = 0.05
 _P_SNV_AT_CPG = 0.03
+_P_MISCALL_AT_CPG = 0.03
+
+# A fragment is only simulated as non-converted if every one of its reads
+# would then retain at least this many non-CpG cytosines. That keeps each
+# read's status clear-cut: comfortably above the filter's default threshold
+# of 3, with no borderline reads whose fate would hinge on a single base.
+_MIN_RETAINED_IF_NON_CONVERTED = 8
 
 
 @dataclass
@@ -70,11 +86,13 @@ class SimulatedRead:
         non_converted: True if the fragment escaped bisulfite conversion (its
             non-CpG cytosines are retained).
         tlen: Signed template length (BAM TLEN).
-        cpg_calls: ``(position, state)`` for every CpG whose ``C`` lies within
-            the read, in reference order. ``position`` is the 1-based position
-            of the ``C``; ``state`` is ``1`` (methylated), ``0`` (unmethylated)
-            or ``-1`` (the informative base was hit by a sequencing error, or
-            — bottom strand only — lies just past the end of the read).
+        cpg_calls: ``(position, state)`` for every CpG whose informative
+            base lies within the read, in reference order: the ``C`` of the
+            CpG for a top-strand fragment, the ``G`` for a bottom-strand
+            fragment. ``position`` is the 1-based position of the CpG's ``C``
+            either way; ``state`` is what the read shows: ``1`` (methylated),
+            ``0`` (unmethylated) or ``-1`` (a sequencing error left a base
+            that is neither).
         retained_non_cpg: Number of unconverted non-CpG cytosines in the read
             (guanines, for the bottom strand). ``0`` unless ``non_converted``.
     """
@@ -103,12 +121,14 @@ class SimulatedDataset:
         aligner: Tag dialect the BAM was written in.
         chromosomes: Reference names, in BAM header order.
         reads: Every read, in the order it appears in the BAM.
+        paired: Whether the reads are paired-end.
     """
 
     bam_path: str
     aligner: str
     chromosomes: list[str]
     reads: list[SimulatedRead]
+    paired: bool = True
 
 
 def _cpg_positions(reference: str) -> list[int]:
@@ -119,6 +139,28 @@ def _cpg_positions(reference: str) -> list[int]:
         positions.append(pos)
         pos = reference.find("CG", pos + 1)
     return positions
+
+
+def _non_cpg_cytosines(
+    reference: str, start: int, end: int, bottom_strand: bool
+) -> int:
+    """Count non-CpG cytosines of a read's bisulfite strand within [start, end).
+
+    These are the bases bisulfite conversion acts on regardless of
+    methylation: reference ``C`` not followed by ``G`` for the top strand,
+    reference ``G`` not preceded by ``C`` for the bottom strand.
+    """
+    if bottom_strand:
+        return sum(
+            1
+            for pos in range(start, end)
+            if reference[pos] == "G" and reference[pos - 1] != "C"
+        )
+    return sum(
+        1
+        for pos in range(start, end)
+        if reference[pos] == "C" and reference[pos + 1] != "G"
+    )
 
 
 def _md_tag(reference: str, read: str) -> str:
@@ -183,8 +225,10 @@ def simulate_bam(
     fragments_per_chromosome: int = 150,
     seed: int = 0,
     strands: tuple[str, ...] = ("top", "bottom"),
+    paired: bool = True,
+    bismark_xg_tag: bool = True,
 ) -> SimulatedDataset:
-    """Simulate paired-end bisulfite reads and write them as an indexed BAM.
+    """Simulate bisulfite reads and write them as an indexed BAM.
 
     Args:
         out_dir: Existing directory to write ``simulated.<aligner>.bam`` into.
@@ -197,6 +241,10 @@ def simulate_bam(
             produce the same reads.
         strands: Strands of origin to draw fragments from: any of ``"top"``
             and ``"bottom"``.
+        paired: If True (default) write both mates of each fragment. If
+            False write single-end reads: only read 1, unpaired.
+        bismark_xg_tag: Bismark dialect only. If False, omit the ``XG``
+            genome-strand tag, as a Bismark-style BAM from another tool might.
 
     Returns:
         The path of the BAM together with the truth for every read.
@@ -239,6 +287,11 @@ def simulate_bam(
 
             bottom_strand = rng.choice(strands) == "bottom"
             mapq = rng.randrange(0, 20) if rng.random() < _P_LOW_MAPQ else 60
+            # Occasionally only one mate maps poorly: the other must then
+            # stand alone as its fragment.
+            low_mapq_mate = (
+                rng.randrange(2) if rng.random() < _P_LOW_MAPQ_ONE_MATE else None
+            )
             duplicate = rng.random() < _P_DUPLICATE
             non_converted = rng.random() < _P_NON_CONVERTED_FRAGMENT
             fully_unmethylated = rng.random() < _P_FULLY_UNMETHYLATED_FRAGMENT
@@ -256,11 +309,20 @@ def simulate_bam(
             # Left mate is forward, right mate is reverse. Which of them is
             # read 1 depends on the strand the fragment came from.
             mate_starts = (fragment_start, fragment_end - READ_LENGTH)
+
+            if non_converted and any(
+                _non_cpg_cytosines(reference, start, start + READ_LENGTH, bottom_strand)
+                < _MIN_RETAINED_IF_NON_CONVERTED
+                for start in mate_starts
+            ):
+                non_converted = False
             for mate_index, start in enumerate(mate_starts):
                 end = start + READ_LENGTH
                 is_left = mate_index == 0
                 is_reverse = not is_left
                 is_read1 = is_left != bottom_strand
+                if not paired and not is_read1:
+                    continue
 
                 # Bisulfite conversion, expressed in reference orientation.
                 bases = []
@@ -283,18 +345,27 @@ def simulate_bam(
                             base = "A"
                     bases.append(base)
 
-                # Sequencing errors on the informative base of a CpG, and the
-                # truth for every CpG whose C lies within the read.
+                # What the read shows at each CpG whose informative base it
+                # covers — the C for a top-strand fragment, the G (one base
+                # to the right) for a bottom-strand fragment — after
+                # sequencing errors, which are drawn per mate.
+                informative_offset = 1 if bottom_strand else 0
+                if bottom_strand:
+                    methylated_base, unmethylated_base, other_base = "G", "A", "C"
+                else:
+                    methylated_base, unmethylated_base, other_base = "C", "T", "A"
                 cpg_calls = []
-                for cpg in cpgs[
-                    bisect.bisect_left(cpgs, start) : bisect.bisect_left(cpgs, end)
-                ]:
-                    informative = cpg + 1 if bottom_strand else cpg
-                    if informative >= end:
-                        state = -1  # the G of the CpG is past the read's end
-                    elif rng.random() < _P_SNV_AT_CPG:
-                        bases[informative - start] = "C" if bottom_strand else "A"
+                first_cpg = bisect.bisect_left(cpgs, start - informative_offset)
+                last_cpg = bisect.bisect_left(cpgs, end - informative_offset)
+                for cpg in cpgs[first_cpg:last_cpg]:
+                    index = cpg + informative_offset - start
+                    error = rng.random()
+                    if error < _P_SNV_AT_CPG:
+                        bases[index] = other_base
                         state = -1
+                    elif error < _P_SNV_AT_CPG + _P_MISCALL_AT_CPG:
+                        state = 0 if methylated[cpg] else 1
+                        bases[index] = methylated_base if state else unmethylated_base
                     else:
                         state = 1 if methylated[cpg] else 0
                     cpg_calls.append((cpg + 1, state))
@@ -307,10 +378,16 @@ def simulate_bam(
                     is_read1=is_read1,
                     is_reverse=is_reverse,
                     bottom_strand=bottom_strand,
-                    mapq=mapq,
+                    mapq=(
+                        rng.randrange(0, 20) if low_mapq_mate == mate_index else mapq
+                    ),
                     duplicate=duplicate,
                     non_converted=non_converted,
-                    tlen=fragment_length if is_left else -fragment_length,
+                    tlen=(
+                        0
+                        if not paired
+                        else fragment_length if is_left else -fragment_length
+                    ),
                     cpg_calls=cpg_calls,
                     retained_non_cpg=retained_non_cpg,
                 )
@@ -327,19 +404,25 @@ def simulate_bam(
             segment.query_name = read.name
             segment.query_sequence = read.sequence
             segment.query_qualities = pysam.qualitystring_to_array("I" * READ_LENGTH)
-            segment.flag = (
-                0x1  # paired
-                | 0x2  # proper pair
-                | (0x10 if read.is_reverse else 0x20)  # self / mate reverse
-                | (0x40 if read.is_read1 else 0x80)
-                | (0x400 if read.duplicate else 0)
-            )
+            if paired:
+                segment.flag = (
+                    0x1  # paired
+                    | 0x2  # proper pair
+                    | (0x10 if read.is_reverse else 0x20)  # self / mate reverse
+                    | (0x40 if read.is_read1 else 0x80)
+                    | (0x400 if read.duplicate else 0)
+                )
+            else:
+                segment.flag = (0x10 if read.is_reverse else 0) | (
+                    0x400 if read.duplicate else 0
+                )
             segment.reference_id = chrom_index
             segment.reference_start = read.start
             segment.mapping_quality = read.mapq
             segment.cigartuples = [(0, READ_LENGTH)]
-            segment.next_reference_id = chrom_index
-            segment.next_reference_start = mate_start
+            if paired:
+                segment.next_reference_id = chrom_index
+                segment.next_reference_start = mate_start
             segment.template_length = read.tlen
 
             reference_span = reference[read.start : read.start + READ_LENGTH]
@@ -357,7 +440,8 @@ def simulate_bam(
                     ),
                 )
                 segment.set_tag("XR", "CT" if read.is_read1 else "GA")
-                segment.set_tag("XG", "GA" if read.bottom_strand else "CT")
+                if bismark_xg_tag:
+                    segment.set_tag("XG", "GA" if read.bottom_strand else "CT")
             bam.write(segment)
     pysam.index(bam_path)
 
@@ -366,4 +450,5 @@ def simulate_bam(
         aligner=aligner,
         chromosomes=list(chromosomes),
         reads=[read for _, read, _ in records],
+        paired=paired,
     )

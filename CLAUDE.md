@@ -52,12 +52,15 @@ tests/
   conftest.py         # Runs every test in its own temporary working directory
   paths.py            # Absolute paths to the bundled fixtures (TEST_BAM, TEST_FASTA, ...)
   simulate.py         # Bisulfite read simulator with known per-CpG truth
+  data/sarscov2/      # Real Bismark and bwa-meth output for the same reads (+ reference, licence)
   test_main.py        # CLI tests
   test_functions.py   # Core function tests
   test_embedding.py   # Embedding class tests
   test_filters.py     # Non-converted / EM over-conversion filter tests
   test_parallel.py    # --threads parallel extraction tests
   test_simulated.py   # End-to-end tests against simulated reads with known truth
+  test_fragments.py   # Hand-built read pairs: one test per fragment-assembly rule
+  test_real_aligners.py  # Real Bismark / bwa-meth output: tag conventions, cross-aligner identity
   test_duplication.py  # Read duplication bug tests
   test_inspect.py     # Inspect CLI tests
   test_metadata.py    # Metadata read/write/round-trip tests
@@ -113,6 +116,7 @@ xdoctest validates code examples in docstrings. Important rules:
 - Test fixtures: `test.bam`, `test.bam.bai`, `test_fasta.fa`
 - **Tests run in a temporary working directory** (autouse fixture in `tests/conftest.py`), so cache files and default outputs never land in the checkout. Refer to bundled fixtures through the absolute-path constants in `tests/paths.py` (`TEST_BAM`, `TEST_BAM_INDEX`, `TEST_FASTA`), never by a path relative to the repo root.
 - **`test.bam` barely overlaps `test_fasta.fa`** (real hg38 alignments vs. a 700 kb reference; one read survives extraction). For tests that need many reads with known answers, use `tests/simulate.py`: `simulate_bam()` writes an indexed Biscuit- or Bismark-style BAM from `test_fasta.fa` and returns the per-read ground truth. See `tests/test_simulated.py`.
+- **Real aligner output** lives in `tests/data/sarscov2/` (paths in `tests/paths.py`): the same 557 read pairs aligned by Bismark and by bwa-meth. Simulated and hand-built reads only encode what we *believe* aligners write; when changing strand or tag handling, `tests/test_real_aligners.py` is the check against what they actually write. The two files must always extract to identical matrices.
 - Run tests across Python 3.11, 3.12, 3.13 via nox
 - Coverage reporting enabled (minimum threshold: 10%)
 - **Typeguard**: `nox --session=typeguard` runs runtime type checking. All function arguments must match their type annotations exactly — pass `str`, not `Path`, when the signature says `str`. This catches real bugs that mypy misses (e.g., passing `pathlib.PosixPath` to a `str` parameter).
@@ -121,21 +125,29 @@ xdoctest validates code examples in docstrings. Important rules:
 
 ### Data Structure
 - Output: scipy sparse COO matrix saved as .npz
-- Rows = unique reads (primary alignments)
+- Rows = sequenced DNA fragments: the two mates of a read pair merged into one row; a single-end read (or a read whose mate is filtered, missing, on another chromosome, or more than 100 kb away) is its own row. Ordered by chromosome, then by where each fragment's first CpG-covering read appears in the BAM.
 - Columns = CpG sites (ordered by genomic position, determined by reference genome)
-- Values: 1 (methylated), 0 (unmethylated), -1 (no data/indels/SNVs)
+- Values: 1 (methylated), 0 (unmethylated), -1 (no data: indel/SNV at the CpG, or the two mates disagreeing)
+- A CpG covered by both mates is stored once: agreement keeps the call, a lone call beats -1, a methylated/unmethylated disagreement becomes -1 (`_merge_mate_calls`).
+- `0` (unmethylated) is stored explicitly; uncovered CpGs are absent. Never densify to test for unmethylated calls, and never call `eliminate_zeros()`.
+- **Output format version**: `metadata.json` carries `format_version` (currently 2) and `row_unit` (`fragment`), defined in `metadata.py` (`OUTPUT_FORMAT_VERSION`). Files without it are format 1 (one row per read). Bump `OUTPUT_FORMAT_VERSION`, and describe the new version in the `metadata.py` docstring and README, whenever the meaning of rows, columns, values or `tlen` changes.
 - Each .npz file contains a `metadata.json` entry with provenance info (genome name, version, CpG index CRC32, expected chromosomes). Read via `bam2tensor.metadata.read_npz_metadata()`.
-- Each .npz file contains a `tlen.npy` entry with per-read signed template length (BAM TLEN field) as int32. Read via `bam2tensor.metadata.read_npz_tlen()`. Returns `None` for files from older versions.
+- Each .npz file contains a `tlen.npy` entry with the length of each fragment (absolute BAM TLEN, 0 if unknown) as int32, one per row. Read via `bam2tensor.metadata.read_npz_tlen()`. Returns `None` for files from older versions.
 - `extract_methylation_data_from_bam()` returns an `ExtractionResult` NamedTuple with `.matrix` (sparse COO) and `.tlen` (numpy int32 array).
 - Matrix values are int64 and row/col indices int32 (int64 only past 2**31 rows or columns). These dtypes are part of the on-disk format; keep them stable.
 - Column of a CpG = `embedding.chromosome_offsets[chrom]` + its index in the sorted `embedding.cpg_sites_dict[chrom]`. There is deliberately no per-position lookup dict (it cost several GB for a human genome); use `genomic_position_to_embedding()` (a binary search) or the index arithmetic directly.
 - The `cpg_index_crc32` stored in every output is defined over the text `chrom\tpos1,pos2,...` per chromosome joined by newlines. Its value is pinned by a test; never change the definition.
 
 ### Methylation Strand Detection
-- Bismark aligner: XM tag (Z/z for methylated/unmethylated CpG; no strand filtering needed)
-- Biscuit aligner: YD tag
-- bwameth aligner: YD tag (same format as Biscuit)
-- gem3/blueprint aligner: XB tag
+A fragment derives from the top or the bottom strand of the original DNA, and **both mates of a pair report on that same strand** (they carry the same strand tag). BAM stores reads in top-strand orientation, so for a CpG whose C is at reference position p:
+- top-strand fragment: the call is on the C at p (C = methylated, T = unmethylated)
+- bottom-strand fragment: the call is on the G at p + 1 (G = methylated, A = unmethylated)
+
+Every read is decoded at its fragment's informative base. The read's own alignment orientation (flag 0x10) is irrelevant and must never be used to filter reads: doing so discards one mate of every pair.
+- Bismark aligner: `XM` call string (Z/z = methylated/unmethylated CpG) read at the informative base; strand from `XG` (CT = top, GA = bottom). Bismark writes the call on the C for top-strand alignments and on the G for bottom-strand ones. Without `XG`, the strand is inferred from the bases the calls sit on.
+- Biscuit aligner: `YD` tag (f = top, r = bottom); call read from the base
+- bwameth aligner: `YD` tag (same format as Biscuit)
+- gem3/blueprint aligner: `XB` tag (C = top, G = bottom); not verified against real gem3 output
 
 ### Dependencies
 - pysam: BAM file handling
@@ -176,8 +188,10 @@ results are concatenated in `cpg_sites_dict` order, whatever order the
 workers finish in. Each task carries only that chromosome's CpG positions
 and column offset; the embedding object itself is never sent to a worker.
 Per-chromosome results are typed arrays (column index, int8 call, CpGs per
-read, TLEN); row indices are rebuilt once at the end from the per-read
-counts. Callers using `threads > 1` from a script need the usual
+fragment, TLEN); row indices are rebuilt once at the end from the
+per-fragment counts. Mates are only merged within a chromosome, so the
+per-chromosome workers assemble fragments exactly as the sequential path
+does. Callers using `threads > 1` from a script need the usual
 `if __name__ == "__main__":` guard (spawn re-imports the main module).
 
 When recommending CPU counts:

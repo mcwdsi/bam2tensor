@@ -40,6 +40,8 @@ from bam2tensor.functions import (
     extract_methylation_data_from_bam,
 )
 from bam2tensor.metadata import (
+    OUTPUT_FORMAT_VERSION,
+    OUTPUT_ROW_UNIT,
     compute_cpg_index_crc32,
     write_npz_metadata,
     write_npz_tlen,
@@ -199,7 +201,7 @@ def validate_input_output(
 
 
 @click.command(
-    help="Extract read-level methylation data from an aligned bisulfite-seq or EM-seq .bam file and export the data as a SciPy sparse matrix."
+    help="Extract per-fragment methylation data from an aligned bisulfite-seq or EM-seq .bam file and export the data as a SciPy sparse matrix (one row per sequenced DNA fragment)."
 )
 @click.version_option()
 @click.option(
@@ -238,17 +240,19 @@ def validate_input_output(
 @click.option(
     "--filter-non-converted",
     help=(
-        "Drop reads with >= --non-converted-threshold retained non-CpG "
-        "cytosines, the signature of incomplete bisulfite/EM-seq conversion "
-        "(port of nebiolabs/mark-nonconverted-reads). Default: off."
+        "Drop fragments in which a read has >= --non-converted-threshold "
+        "retained non-CpG cytosines, the signature of incomplete "
+        "bisulfite/EM-seq conversion (port of "
+        "nebiolabs/mark-nonconverted-reads). Default: off."
     ),
     is_flag=True,
 )
 @click.option(
     "--non-converted-threshold",
     help=(
-        "Minimum count of retained non-CpG cytosines to drop a read "
-        "(default = 3, matches NEB mark-nonconverted-reads)."
+        "Minimum count of retained non-CpG cytosines in a read for its "
+        "fragment to be dropped (default = 3, matches NEB "
+        "mark-nonconverted-reads)."
     ),
     default=3,
     type=int,
@@ -256,7 +260,7 @@ def validate_input_output(
 @click.option(
     "--filter-em-overconversion",
     help=(
-        "Drop EM-seq reads whose covered CpGs are all called unmethylated "
+        "Drop EM-seq fragments whose covered CpGs are all called unmethylated "
         "and cover at least --em-overconversion-min-cpgs sites (heuristic "
         "for the fragment-level over-conversion artifact described in "
         "Loyfer et al. bioRxiv 2026.03.24.713040). Default: off."
@@ -267,7 +271,7 @@ def validate_input_output(
     "--em-overconversion-min-cpgs",
     help=(
         "Minimum covered CpG count required before the EM over-conversion "
-        "filter will drop a read (default = 3)."
+        "filter will drop a fragment (default = 3)."
     ),
     default=3,
     type=int,
@@ -334,7 +338,7 @@ def main(
     """Extract methylation data from BAM files and save as sparse matrices.
 
     Main entry point for the bam2tensor CLI. Processes one or more BAM files,
-    extracting read-level CpG methylation data and saving the results as
+    extracting per-fragment CpG methylation data and saving the results as
     SciPy sparse COO matrices in .npz format.
 
     The workflow is:
@@ -343,7 +347,7 @@ def main(
         3. Validate input/output permissions
         4. For each BAM file:
            a. Extract methylation states from aligned reads
-           b. Build a sparse matrix (rows=reads, columns=CpG sites)
+           b. Build a sparse matrix (rows=fragments, columns=CpG sites)
            c. Save to .methylation.npz file
 
     Args:
@@ -360,17 +364,17 @@ def main(
             ``--download-reference`` is used.
         quality_limit: Minimum mapping quality (MAPQ) threshold. Reads below
             this quality are excluded.
-        filter_non_converted: If True, drop reads with at least
-            ``non_converted_threshold`` retained non-CpG cytosines —
-            indicating incomplete bisulfite/EM-seq conversion.
+        filter_non_converted: If True, drop fragments in which a read
+            has at least ``non_converted_threshold`` retained non-CpG
+            cytosines — indicating incomplete bisulfite/EM-seq conversion.
         non_converted_threshold: Threshold used by the non-converted
             read filter.
-        filter_em_overconversion: If True, drop reads whose covered CpGs
-            are all called unmethylated and cover at least
+        filter_em_overconversion: If True, drop fragments whose covered
+            CpGs are all called unmethylated and cover at least
             ``em_overconversion_min_cpgs`` sites — heuristic for EM-seq
             fragment-level over-conversion (Loyfer et al. 2026).
         em_overconversion_min_cpgs: Minimum covered CpG count required
-            before the over-conversion filter will drop a read.
+            before the over-conversion filter will drop a fragment.
         threads: Number of worker processes for per-chromosome
             extraction. Default 1.
         verbose: If True, print detailed progress information.
@@ -573,11 +577,11 @@ def main(
             print(f"  WARNING: {caught.message}")
 
         # Matrix stats
-        n_reads = extraction_result.matrix.shape[0]
+        n_fragments = extraction_result.matrix.shape[0]
         n_cpgs = extraction_result.matrix.shape[1]
         n_data = extraction_result.matrix.nnz
         print(
-            f"  Result:        {n_reads:,} reads x {n_cpgs:,} CpG sites"
+            f"  Result:        {n_fragments:,} fragments x {n_cpgs:,} CpG sites"
             f" ({n_data:,} data points)"
         )
 
@@ -588,6 +592,8 @@ def main(
             output_file,
             {
                 "bam2tensor_version": __version__,
+                "format_version": OUTPUT_FORMAT_VERSION,
+                "row_unit": OUTPUT_ROW_UNIT,
                 "genome_name": genome_name,
                 "expected_chromosomes": chrom_list,
                 "total_cpg_sites": genome_methylation_embedding.total_cpg_sites,
