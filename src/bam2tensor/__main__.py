@@ -36,6 +36,7 @@ from bam2tensor.embedding import GenomeMethylationEmbedding
 
 from bam2tensor import __version__
 from bam2tensor.functions import (
+    ExtractionResult,
     detect_aligner,
     extract_methylation_data_from_bam,
 )
@@ -176,9 +177,10 @@ def validate_input_output(
             If None, output files are placed next to the input BAM files.
 
     Raises:
-        ValueError: If any input BAM file is not readable, if the output
-            directory is not writable, or if ``overwrite`` is set and an
-            existing output file is not writable.
+        ValueError: If any input BAM file is not readable, if the
+            directory an output will be written to is not writable, or if
+            ``overwrite`` is set and an existing output file is not
+            writable.
 
     Note:
         Output files are named by replacing the .bam extension with
@@ -191,13 +193,48 @@ def validate_input_output(
 
         output_file = get_output_path(bam_file, output_dir)
         if os.path.exists(output_file):
-            # Without --overwrite the BAM is skipped, so nothing is written.
-            if overwrite and not os.access(output_file, os.W_OK):
+            if not overwrite:
+                continue  # The BAM will be skipped, so nothing is written.
+            if not os.access(output_file, os.W_OK):
                 raise ValueError(
                     f"Output file exists and is not writable: {output_file}"
                 )
-        elif not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
+        # The output is written to a temporary file beside its final location
+        # and renamed into place, so the directory itself must be writable —
+        # for a first write and for an overwrite alike.
+        if not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
             raise ValueError(f"Output file path is not writable: {output_file}")
+
+
+def write_output(
+    output_file: str, extraction_result: ExtractionResult, metadata: dict
+) -> None:
+    """Write a ``.methylation.npz`` file: matrix, fragment lengths and metadata.
+
+    The file is assembled under a temporary name in the same directory and
+    renamed into place only once all three parts have been written. A run
+    that is interrupted, or that fails part-way, therefore leaves no output
+    file at all rather than one that looks complete but lacks its fragment
+    lengths or metadata — which matters because an existing output is
+    skipped on the next run unless ``--overwrite`` is given. An output that
+    already exists is left untouched until its replacement is complete.
+
+    Args:
+        output_file: Path of the ``.methylation.npz`` file to create.
+        extraction_result: The matrix and fragment lengths to store.
+        metadata: JSON-serialisable provenance metadata to embed.
+    """
+    # The suffix keeps the name ending in ".npz" (scipy would otherwise append
+    # it) without matching the "*.methylation.npz" pattern of finished files.
+    temporary_file = f"{output_file}.{os.getpid()}.tmp.npz"
+    try:
+        scipy.sparse.save_npz(temporary_file, extraction_result.matrix, compressed=True)
+        write_npz_tlen(temporary_file, extraction_result.tlen)
+        write_npz_metadata(temporary_file, metadata)
+        os.replace(temporary_file, output_file)
+    finally:
+        if os.path.exists(temporary_file):
+            os.remove(temporary_file)
 
 
 @click.command(
@@ -586,10 +623,9 @@ def main(
         )
 
         # Save
-        scipy.sparse.save_npz(output_file, extraction_result.matrix, compressed=True)
-        write_npz_tlen(output_file, extraction_result.tlen)
-        write_npz_metadata(
+        write_output(
             output_file,
+            extraction_result,
             {
                 "bam2tensor_version": __version__,
                 "format_version": OUTPUT_FORMAT_VERSION,

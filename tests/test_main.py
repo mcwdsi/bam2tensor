@@ -3,13 +3,16 @@
 import os
 import shutil
 
+import numpy as np
 import pysam
 import pytest
+import scipy.sparse
 from click.testing import CliRunner
 
 from bam2tensor import __main__
 from bam2tensor.__main__ import get_output_path
-from bam2tensor.metadata import read_npz_tlen
+from bam2tensor.functions import ExtractionResult
+from bam2tensor.metadata import read_npz_metadata, read_npz_tlen
 from tests.paths import (
     SARSCOV2_BISMARK_BAM,
     SARSCOV2_BWAMETH_BAM,
@@ -584,7 +587,11 @@ def test_validate_input_output_existing_writable_with_overwrite(tmp_path) -> Non
 
 
 def test_validate_input_output_existing_output_in_unwritable_dir(tmp_path) -> None:
-    """An existing, writable output can be overwritten even in a read-only dir."""
+    """Overwriting needs a writable directory, not just a writable file.
+
+    The replacement is written beside the existing output and renamed over
+    it, so that a failed overwrite cannot destroy the file being replaced.
+    """
     bam_file = tmp_path / "test.bam"
     bam_file.touch()
     locked = tmp_path / "locked"
@@ -593,11 +600,130 @@ def test_validate_input_output_existing_output_in_unwritable_dir(tmp_path) -> No
     os.chmod(locked, 0o555)
 
     try:
+        with pytest.raises(ValueError, match="Output file path is not writable"):
+            __main__.validate_input_output(
+                [str(bam_file)], overwrite=True, output_dir=str(locked)
+            )
+        # Without --overwrite the existing output means the BAM is skipped.
         __main__.validate_input_output(
-            [str(bam_file)], overwrite=True, output_dir=str(locked)
+            [str(bam_file)], overwrite=False, output_dir=str(locked)
         )
     finally:
         os.chmod(locked, 0o755)
+
+
+# ======================================================================
+# Output files are written atomically
+# ======================================================================
+
+
+def _small_result():
+    """A tiny ExtractionResult to write."""
+    matrix = scipy.sparse.coo_matrix(
+        (np.array([1, 0, -1]), (np.array([0, 0, 1]), np.array([0, 2, 1]))),
+        shape=(2, 5),
+    )
+    return ExtractionResult(matrix=matrix, tlen=np.array([150, 0], dtype=np.int32))
+
+
+def test_write_output_writes_matrix_tlen_and_metadata(tmp_path) -> None:
+    """A successful write holds all three parts and leaves no temporary file."""
+    output_file = str(tmp_path / "sample.methylation.npz")
+    __main__.write_output(output_file, _small_result(), {"genome_name": "tiny"})
+
+    assert os.listdir(tmp_path) == ["sample.methylation.npz"]
+    loaded = scipy.sparse.load_npz(output_file)
+    assert loaded.shape == (2, 5)
+    assert loaded.toarray().tolist() == [[1, 0, 0, 0, 0], [0, -1, 0, 0, 0]]
+    tlen = read_npz_tlen(output_file)
+    assert tlen is not None
+    assert tlen.tolist() == [150, 0]
+    assert read_npz_metadata(output_file) == {"genome_name": "tiny"}
+
+
+@pytest.mark.parametrize("failing_step", ["write_npz_tlen", "write_npz_metadata"])
+def test_failed_write_leaves_no_output_file(
+    tmp_path, monkeypatch, failing_step
+) -> None:
+    """A write that fails part-way leaves nothing behind.
+
+    Regression: the matrix was saved to its final name first and the
+    fragment lengths and metadata appended afterwards. A failure — or an
+    interruption — in between left a file that loaded fine but was
+    incomplete, and the next run skipped it as already done.
+    """
+
+    def fail(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(__main__, failing_step, fail)
+    output_file = str(tmp_path / "sample.methylation.npz")
+
+    with pytest.raises(OSError, match="No space left on device"):
+        __main__.write_output(output_file, _small_result(), {"genome_name": "tiny"})
+
+    assert os.listdir(tmp_path) == []
+
+
+def test_failed_overwrite_keeps_the_existing_output(tmp_path, monkeypatch) -> None:
+    """A failed overwrite leaves the previous file byte-for-byte intact."""
+    output_file = str(tmp_path / "sample.methylation.npz")
+    __main__.write_output(output_file, _small_result(), {"run": "first"})
+    with open(output_file, "rb") as f:
+        before = f.read()
+
+    def fail(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(__main__, "write_npz_metadata", fail)
+    with pytest.raises(KeyboardInterrupt):
+        __main__.write_output(output_file, _small_result(), {"run": "second"})
+
+    with open(output_file, "rb") as f:
+        assert f.read() == before
+    assert os.listdir(tmp_path) == ["sample.methylation.npz"]
+    assert read_npz_metadata(output_file) == {"run": "first"}
+
+
+def test_main_interrupted_save_is_redone_on_the_next_run(
+    runner: CliRunner, tmp_path, monkeypatch
+) -> None:
+    """After a failed save, a plain re-run (no --overwrite) processes the BAM.
+
+    Nothing was left behind for the "output already exists" check to find.
+    """
+    shutil.copy(TEST_BAM, tmp_path / "sample.bam")
+    shutil.copy(TEST_BAM_INDEX, tmp_path / "sample.bam.bai")
+    args = [
+        "--input-path",
+        str(tmp_path / "sample.bam"),
+        "--reference-fasta",
+        TEST_FASTA,
+        "--genome-name",
+        "test",
+        "--expected-chromosomes",
+        "chr1,chr2,chr3",
+    ]
+    real_write_metadata = __main__.write_npz_metadata
+
+    def fail(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(__main__, "write_npz_metadata", fail)
+    failed = runner.invoke(__main__.main, args)
+    assert failed.exit_code != 0
+    assert isinstance(failed.exception, OSError)
+    assert not (tmp_path / "sample.methylation.npz").exists()
+    assert sorted(p.name for p in tmp_path.glob("sample*")) == [
+        "sample.bam",
+        "sample.bam.bai",
+    ]
+
+    monkeypatch.setattr(__main__, "write_npz_metadata", real_write_metadata)
+    retried = runner.invoke(__main__.main, args)
+    assert retried.exit_code == 0, retried.output
+    assert "Skipped" not in retried.output
+    assert read_npz_metadata(str(tmp_path / "sample.methylation.npz")) is not None
 
 
 # ======================================================================

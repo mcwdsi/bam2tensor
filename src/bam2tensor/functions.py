@@ -66,6 +66,7 @@ Example:
     >>> print(f"Extracted {result.matrix.shape[0]} reads, {result.matrix.nnz} data points")
 """
 
+from collections.abc import Container
 from typing import Iterator, NamedTuple
 
 import array
@@ -134,6 +135,7 @@ def count_non_cpg_retained_xm(xm_tag: str) -> int:
 def count_non_cpg_retained_reference(
     aligned_segment: pysam.AlignedSegment,
     is_reverse_parent_strand: bool,
+    cpg_positions: Container[int] | None = None,
 ) -> int:
     """Count retained non-CpG bases validated against the reference.
 
@@ -146,11 +148,28 @@ def count_non_cpg_retained_reference(
     genuinely has a ``C``/``G`` (i.e., the mismatch is not a SNP) count
     as retained.
 
-    This is a faithful port of the logic in
+    This is a port of the logic in
     ``nebiolabs/mark-nonconverted-reads``, re-using the read's existing
     ``MD`` tag (via :py:meth:`pysam.AlignedSegment.get_aligned_pairs`
     with ``with_seq=True``) instead of requiring a separate reference
     FASTA.
+
+    Which cytosines are in CpG context — and so exempt — is best taken
+    from the CpG index via ``cpg_positions``. Without it, the context is
+    inferred from the neighbouring reference base as reconstructed from
+    the read, which cannot see a neighbour lying just outside the
+    alignment: a methylated CpG cut by the end of the read is then
+    counted as a retained non-CpG cytosine.
+
+    Note:
+        The count is only as good as the ``MD`` tag. bwa-meth writes
+        ``MD`` relative to its bisulfite-converted reference. For the
+        directional libraries bwa-meth is designed for, that gives the
+        exact count, with one blind spot: a read ``C`` over a reference
+        ``T`` (or ``G`` over ``A``) is a SNP that conversion makes
+        invisible, so it is counted as retained. For a non-directional
+        library aligned with bwa-meth the tag does not describe the
+        read as stored, and retained cytosines are undercounted.
 
     Args:
         aligned_segment: A pysam aligned read. Must carry an ``MD``
@@ -159,6 +178,11 @@ def count_non_cpg_retained_reference(
         is_reverse_parent_strand: ``True`` if the read derives from the
             reverse (OB/CTOB) bisulfite parent strand, ``False`` for
             the forward (OT/CTOT) strand.
+        cpg_positions: 0-based reference positions of the ``C`` of
+            every CpG the read touches, including a CpG whose ``C`` or
+            ``G`` lies just outside the alignment. If ``None``, CpG
+            context is inferred from the read's own reconstruction of
+            the reference.
 
     Returns:
         The number of reference-validated retained non-CpG
@@ -189,12 +213,19 @@ def count_non_cpg_retained_reference(
             # Not a match, or ref is not C/G. This rejects SNPs (lowercase)
             # and converted positions (read has T/A, match has different base).
             continue
-        # Exclude CpG context: on forward strand, next ref base == G;
-        # on reverse strand, previous ref base == C.
-        if is_reverse_parent_strand:
+        # Exclude CpG context.
+        if cpg_positions is not None:
+            # From the CpG index: exact, even when the other base of the CpG
+            # lies outside the read. On the reverse strand the retained base
+            # is the G, one position right of the CpG's C.
+            if (rpos - 1 if is_reverse_parent_strand else rpos) in cpg_positions:
+                continue
+        elif is_reverse_parent_strand:
+            # Reverse strand: previous reference base is C.
             if ref_pos_to_base.get(rpos - 1) == "C":
                 continue
         else:
+            # Forward strand: next reference base is G.
             if ref_pos_to_base.get(rpos + 1) == "G":
                 continue
         count += 1
@@ -822,8 +853,20 @@ def _extract_chromosome(
                     # silently doing nothing.
                     reads_without_md += 1
                 else:
+                    # The C of every CpG the read touches (0-based), counting
+                    # a CpG whose C or G lies just outside the alignment, so
+                    # that CpG context is exact right up to the read's ends.
+                    nearby_cpgs = {
+                        cpg_sites[i] - 1
+                        for i in range(
+                            bisect.bisect_left(cpg_sites, reference_start),
+                            bisect.bisect_right(cpg_sites, reference_end),
+                        )
+                    }
                     non_converted = (
-                        count_non_cpg_retained_reference(aligned_segment, bottom_strand)
+                        count_non_cpg_retained_reference(
+                            aligned_segment, bottom_strand, nearby_cpgs
+                        )
                         >= non_converted_threshold
                     )
 

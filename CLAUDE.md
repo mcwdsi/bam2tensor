@@ -148,6 +148,7 @@ Every read is decoded at its fragment's informative base. The read's own alignme
 - Biscuit aligner: `YD` tag (f = top, r = bottom); call read from the base
 - bwameth aligner: `YD` tag (same format as Biscuit)
 - gem3/blueprint aligner: `XB` tag (C = top, G = bottom); not verified against real gem3 output
+- The strand tag is trusted. It is correct for directional libraries. bwa-meth mis-tags most complementary-strand (CTOT/CTOB) pairs of a non-directional library, so such data decodes wrongly; this cannot be detected from the tags (the upstream nf-core bwa-meth test BAM contains such pairs, which is why the bundled fixture keeps only fragments Bismark also aligned).
 
 ### Dependencies
 - pysam: BAM file handling
@@ -236,6 +237,7 @@ When working on this codebase as an AI coding agent:
 - **Type checking**: mypy with `strict = false` but `check_untyped_defs = true`
 - **Do not modify** `noxfile.py` (excluded from ruff checks)
 - **New CLI options**: Add to both Click decorators and the `main()` function signature in `__main__.py`
+- **Output files** are written by `write_output()` in `__main__.py`: assembled under a temporary name and renamed into place, so a partial `.methylation.npz` never exists. Keep any new entry added to the archive inside that function.
 - **Cache files**: `.cache.json.gz` files are written to the current working directory. A cache is validated against the FASTA by size + modification time when those are trustworthy, and by SHA-256 otherwise; it is rejected (and regenerated) on a version or content mismatch, and raises `ValueError` if it was built for a different chromosome list
 
 ### Using bam2tensor efficiently when invoked from an agent
