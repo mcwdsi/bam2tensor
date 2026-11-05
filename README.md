@@ -596,8 +596,8 @@ These tags indicate which strand the original bisulfite/EM-seq-converted DNA cam
    ```
 
    Notes and trade-offs:
-   - **Default is `--threads 1`.** Worker startup with `spawn` (the safe start method on macOS) pickles the embedding to each worker; for hg38 that's a few seconds. Don't enable for small targeted-region BAMs — the startup cost dominates.
-   - **Memory scales with `--threads`.** Each worker holds its chromosome's row/col/data buffers and a copy of the genome embedding. As a rough rule, budget `1.5 GB / GB BAM` for the first worker and add ~1 GB per additional worker.
+   - **Default is `--threads 1`.** Each worker is a freshly started Python process (`spawn`, the safe start method on macOS) that has to import the scientific stack before doing any work. Don't enable for small targeted-region BAMs — the startup cost dominates.
+   - **Memory scales with `--threads`.** Each worker holds the CpG positions and call buffers for the one chromosome it is processing; the main process holds the CpG index and the accumulated results. As a rough rule, budget `1.5 GB / GB BAM` for the first worker and add ~1 GB per additional worker. Those figures predate the compact call buffers and per-chromosome worker payloads, so treat them as a safe upper bound: in synthetic benchmarks peak extraction memory fell about fivefold (to roughly 25 bytes per CpG observation) and per-worker memory about sevenfold. Measure on your own data before trimming allocations.
    - **Diminishing returns past ~chromosome-count workers.** For hg38 (24 chromosomes) there's no point setting `--threads` above 24. In practice ~8 cores already captures most of the speedup because the largest chromosomes (chr1, chr2) dominate wall time.
    - **Hot loop is Python, not pysam.** Using OS-level threads (e.g. `OMP_NUM_THREADS`) won't help — the GIL holds the per-read CIGAR walk. `--threads` is process-level parallelism via `concurrent.futures.ProcessPoolExecutor`.
 
@@ -618,7 +618,7 @@ These tags indicate which strand the original bisulfite/EM-seq-converted DNA cam
 
 5. **Use SSDs**: Both reading BAM files and writing output benefit from fast storage.
 
-6. **Memory considerations**: Single-threaded memory usage scales with the number of reads (~1.5 GB per GB of input BAM). With `--threads > 1`, add ~1 GB per worker for the embedding copy plus per-chromosome buffers.
+6. **Memory considerations**: Memory scales with the number of CpG observations (reads × CpGs covered per read). The conservative rule of thumb is ~1.5 GB per GB of input BAM single-threaded, plus ~1 GB per additional worker; current versions typically need considerably less (see the notes under tip 2).
 
 ### SLURM array template
 
@@ -668,7 +668,8 @@ GenomeMethylationEmbedding(
 
 **Key Attributes:**
 - `total_cpg_sites: int` - Total number of CpG sites across all chromosomes
-- `cpg_sites_dict: dict[str, list[int]]` - Dictionary mapping chromosome names to lists of CpG positions
+- `cpg_sites_dict: dict[str, list[int]]` - Dictionary mapping chromosome names to sorted lists of CpG positions
+- `chromosome_offsets: dict[str, int]` - Matrix column of the first CpG on each chromosome (the i-th CpG on a chromosome is column `chromosome_offsets[chrom] + i`)
 
 ### `bam2tensor.functions.extract_methylation_data_from_bam`
 
@@ -690,8 +691,10 @@ extract_methylation_data_from_bam(
 ```
 
 **Returns:** An `ExtractionResult` named tuple with two fields:
-- `matrix`: A SciPy COO sparse matrix with shape (n_reads, n_cpg_sites)
+- `matrix`: A SciPy COO sparse matrix with shape (n_reads, n_cpg_sites) and `int64` values
 - `tlen`: A 1-D numpy `int32` array of shape (n_reads,) containing the signed template length (BAM TLEN field) for each read
+
+**Using `threads > 1` from your own script:** worker processes are started with the `spawn` method, which re-imports your script in each worker. Call the function from under `if __name__ == "__main__":` (standard `multiprocessing` practice); otherwise the workers cannot start.
 
 ### `bam2tensor.metadata.read_npz_tlen`
 

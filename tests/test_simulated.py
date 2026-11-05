@@ -498,3 +498,222 @@ def test_cli_output_matches_truth(
     assert metadata["total_cpg_sites"] == sim_embedding.total_cpg_sites
     assert metadata["filters"]["non_converted_reads"]["enabled"] is True
     assert metadata["filters"]["em_overconversion"]["enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Column layout: chromosome order and chromosomes absent from the BAM
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_reordered_expected_chromosomes_match_truth(biscuit_dataset, threads) -> None:
+    """Columns follow expected_chromosomes even when it differs from FASTA order.
+
+    Rows follow the order chromosomes are stored in the embedding (FASTA
+    order), columns the requested chromosome order; the two are independent.
+    """
+    reordered = embedding.GenomeMethylationEmbedding(
+        "simulated_reordered",
+        expected_chromosomes=["chr3", "chr1", "chr2"],
+        fasta_source=TEST_FASTA,
+        skip_cache=True,
+    )
+    assert list(reordered.cpg_sites_dict) == CHROMOSOMES  # FASTA order
+    assert reordered.chromosome_offsets["chr3"] == 0
+
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path,
+        genome_methylation_embedding=reordered,
+        threads=threads,
+    )
+    _assert_matches_truth(result, _expected(biscuit_dataset, reordered), reordered)
+
+    # chr1 reads come first (row order) yet sit after all chr3 columns.
+    first_row_columns = result.matrix.col[result.matrix.row == 0]
+    assert first_row_columns.min() >= len(reordered.cpg_sites_dict["chr3"])
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_embedding_subset_of_bam_chromosomes_matches_truth(
+    biscuit_dataset, threads
+) -> None:
+    """Reads on chromosomes outside the embedding are ignored."""
+    subset = embedding.GenomeMethylationEmbedding(
+        "simulated_subset",
+        expected_chromosomes=["chr2"],
+        fasta_source=TEST_FASTA,
+        skip_cache=True,
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path,
+        genome_methylation_embedding=subset,
+        threads=threads,
+    )
+    expected = _expected(biscuit_dataset, subset)
+    assert 0 < len(expected[3]) < len(_expected(biscuit_dataset, subset, 0)[3]) + 1
+    _assert_matches_truth(result, expected, subset)
+    assert result.matrix.shape[1] == len(subset.cpg_sites_dict["chr2"])
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_chromosome_absent_from_bam_keeps_later_columns_aligned(
+    sim_embedding, tmp_path, threads
+) -> None:
+    """A chromosome with no reads in the BAM does not shift later columns."""
+    dataset = simulate_bam(
+        str(tmp_path),
+        TEST_FASTA,
+        aligner="biscuit",
+        chromosomes=["chr1", "chr3"],  # nothing on chr2
+        fragments_per_chromosome=60,
+        seed=SEED,
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=dataset.bam_path,
+        genome_methylation_embedding=sim_embedding,
+        threads=threads,
+    )
+    _assert_matches_truth(result, _expected(dataset, sim_embedding), sim_embedding)
+
+    chr2_start = sim_embedding.chromosome_offsets["chr2"]
+    chr3_start = sim_embedding.chromosome_offsets["chr3"]
+    columns = result.matrix.col
+    assert not ((columns >= chr2_start) & (columns < chr3_start)).any()
+    assert (columns >= chr3_start).any()
+
+
+# ---------------------------------------------------------------------------
+# Output array contract
+# ---------------------------------------------------------------------------
+
+
+def test_output_dtypes(biscuit_dataset, sim_embedding) -> None:
+    """Calls are int64, indices int32 (for matrices this size), TLEN int32.
+
+    These are the dtypes written to the .npz, so they are part of the output
+    format: downstream code sees them after ``scipy.sparse.load_npz``.
+    """
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path,
+        genome_methylation_embedding=sim_embedding,
+    )
+    assert isinstance(result.matrix, scipy.sparse.coo_matrix)
+    assert result.matrix.dtype == np.int64
+    assert result.matrix.data.dtype == np.int64
+    assert result.matrix.row.dtype == np.int32
+    assert result.matrix.col.dtype == np.int32
+    assert result.tlen.dtype == np.int32
+    assert result.tlen.ndim == 1
+
+    # The arrays are ordinary, writable, self-contained NumPy arrays.
+    for array_ in (
+        result.matrix.data,
+        result.matrix.row,
+        result.matrix.col,
+        result.tlen,
+    ):
+        assert array_.flags.writeable
+        assert array_.flags.c_contiguous
+
+    # Row indices are non-decreasing and every row has at least one call.
+    assert (np.diff(result.matrix.row) >= 0).all()
+    assert len(np.unique(result.matrix.row)) == result.matrix.shape[0]
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_empty_result_has_same_dtypes(
+    biscuit_dataset, sim_embedding, tmp_path, threads
+):
+    """No surviving reads gives an empty matrix with the usual dtypes."""
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path,
+        genome_methylation_embedding=sim_embedding,
+        quality_limit=255,  # nothing passes
+        threads=threads,
+    )
+    assert result.matrix.shape == (0, sim_embedding.total_cpg_sites)
+    assert result.matrix.nnz == 0
+    assert result.matrix.data.dtype == np.int64
+    assert result.matrix.row.dtype == np.int32
+    assert result.matrix.col.dtype == np.int32
+    assert result.tlen.dtype == np.int32
+    assert len(result.tlen) == 0
+
+    # An empty result still saves and loads.
+    npz_path = str(tmp_path / "empty.npz")
+    scipy.sparse.save_npz(npz_path, result.matrix)
+    assert scipy.sparse.load_npz(npz_path).shape == result.matrix.shape
+
+
+def test_columns_beyond_int32_use_64bit_indices(biscuit_dataset, tmp_path) -> None:
+    """A genome with more than 2**31 CpG columns gets 64-bit column indices.
+
+    No real FASTA that large is practical in a test, so shift a real
+    embedding's column space past the int32 limit instead.
+    """
+    huge = embedding.GenomeMethylationEmbedding(
+        "simulated_huge",
+        expected_chromosomes=["chr1"],
+        fasta_source=TEST_FASTA,
+        skip_cache=True,
+    )
+    normal = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path, genome_methylation_embedding=huge
+    )
+
+    shift = 2**31
+    huge.chromosome_offsets = {"chr1": shift}
+    huge.total_cpg_sites += shift
+    shifted = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path, genome_methylation_embedding=huge
+    )
+
+    assert shifted.matrix.shape == (
+        normal.matrix.shape[0],
+        normal.matrix.shape[1] + shift,
+    )
+    assert shifted.matrix.col.dtype == np.int64
+    assert shifted.matrix.row.dtype == np.int64
+    assert np.array_equal(
+        shifted.matrix.col, normal.matrix.col.astype(np.int64) + shift
+    )
+    assert np.array_equal(shifted.matrix.row, normal.matrix.row)
+    assert np.array_equal(shifted.matrix.data, normal.matrix.data)
+    assert np.array_equal(shifted.tlen, normal.tlen)
+
+    # And such a matrix survives a save / load round trip.
+    npz_path = str(tmp_path / "huge.npz")
+    scipy.sparse.save_npz(npz_path, shifted.matrix)
+    loaded = scipy.sparse.load_npz(npz_path)
+    assert loaded.shape == shifted.matrix.shape
+    assert np.array_equal(loaded.col, shifted.matrix.col)
+
+
+# ---------------------------------------------------------------------------
+# Parallel path plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_workers_are_not_sent_the_embedding(biscuit_dataset, sim_embedding) -> None:
+    """Parallel extraction works with an embedding that cannot be pickled.
+
+    Each worker receives only the CpG positions of the chromosome it is
+    processing. Sending the whole embedding to every worker cost about a
+    gigabyte of memory per worker, and seconds of start-up, for a human genome.
+    """
+    unpicklable = embedding.GenomeMethylationEmbedding(
+        "simulated_unpicklable",
+        expected_chromosomes=CHROMOSOMES,
+        fasta_source=TEST_FASTA,
+        skip_cache=True,
+    )
+    unpicklable.not_picklable = lambda: None  # type: ignore[attr-defined]
+
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path,
+        genome_methylation_embedding=unpicklable,
+        threads=2,
+    )
+    _assert_matches_truth(
+        result, _expected(biscuit_dataset, sim_embedding), sim_embedding
+    )

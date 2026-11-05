@@ -127,6 +127,9 @@ xdoctest validates code examples in docstrings. Important rules:
 - Each .npz file contains a `metadata.json` entry with provenance info (genome name, version, CpG index CRC32, expected chromosomes). Read via `bam2tensor.metadata.read_npz_metadata()`.
 - Each .npz file contains a `tlen.npy` entry with per-read signed template length (BAM TLEN field) as int32. Read via `bam2tensor.metadata.read_npz_tlen()`. Returns `None` for files from older versions.
 - `extract_methylation_data_from_bam()` returns an `ExtractionResult` NamedTuple with `.matrix` (sparse COO) and `.tlen` (numpy int32 array).
+- Matrix values are int64 and row/col indices int32 (int64 only past 2**31 rows or columns). These dtypes are part of the on-disk format; keep them stable.
+- Column of a CpG = `embedding.chromosome_offsets[chrom]` + its index in the sorted `embedding.cpg_sites_dict[chrom]`. There is deliberately no per-position lookup dict (it cost several GB for a human genome); use `genomic_position_to_embedding()` (a binary search) or the index arithmetic directly.
+- The `cpg_index_crc32` stored in every output is defined over the text `chrom\tpos1,pos2,...` per chromosome joined by newlines. Its value is pinned by a test; never change the definition.
 
 ### Methylation Strand Detection
 - Bismark aligner: XM tag (Z/z for methylated/unmethylated CpG; no strand filtering needed)
@@ -168,18 +171,27 @@ uv run bam2tensor-inspect output.methylation.npz
 The per-chromosome extraction loop is parallelizable. `--threads N` fans
 out one chromosome per worker via `concurrent.futures.ProcessPoolExecutor`
 with `multiprocessing.get_context("spawn")` (safe for pysam on macOS).
-Output is bitwise-identical to `--threads 1` because chromosomes are
-collected in `cpg_sites_dict` order and per-worker row indices are
-offset by the cumulative read count from preceding chromosomes.
+Output is bitwise-identical to `--threads 1` because per-chromosome
+results are concatenated in `cpg_sites_dict` order, whatever order the
+workers finish in. Each task carries only that chromosome's CpG positions
+and column offset; the embedding object itself is never sent to a worker.
+Per-chromosome results are typed arrays (column index, int8 call, CpGs per
+read, TLEN); row indices are rebuilt once at the end from the per-read
+counts. Callers using `threads > 1` from a script need the usual
+`if __name__ == "__main__":` guard (spawn re-imports the main module).
 
 When recommending CPU counts:
-- Small (region-targeted) BAMs: stay at `--threads 1` — spawn-pickling
-  the embedding to each worker dominates for sub-minute jobs.
+- Small (region-targeted) BAMs: stay at `--threads 1` — starting worker
+  interpreters (and importing numpy/scipy/pysam in each) dominates for
+  sub-minute jobs.
 - Whole-genome WGBS/EM-seq BAMs (≥ 10 GB): `--threads 8` is a good
   default; diminishing returns past `--threads 24` since chr1/chr2
   dominate wall time and that's the longest pole.
-- Memory budget: ~1.5 GB per GB of input BAM, plus ~1 GB per worker
-  for the embedding copy and per-chromosome buffers.
+- Memory budget: ~1.5 GB per GB of input BAM, plus ~1 GB per worker, is
+  the documented conservative rule. Actual use is now several-fold lower
+  (about 25 bytes per CpG observation at peak in synthetic benchmarks;
+  workers hold only the chromosome they are processing), but that has not
+  been re-measured on real whole-genome BAMs.
 - OS-level threads (`OMP_NUM_THREADS`, `threading`) do NOT help — the
   hot loop is Python and GIL-bound. Always use `--threads`.
 
@@ -210,7 +222,7 @@ When working on this codebase as an AI coding agent:
 - **Type checking**: mypy with `strict = false` but `check_untyped_defs = true`
 - **Do not modify** `noxfile.py` (excluded from ruff checks)
 - **New CLI options**: Add to both Click decorators and the `main()` function signature in `__main__.py`
-- **Cache files**: `.cache.json.gz` files are written to the current working directory
+- **Cache files**: `.cache.json.gz` files are written to the current working directory. A cache is validated against the FASTA by size + modification time when those are trustworthy, and by SHA-256 otherwise; it is rejected (and regenerated) on a version or content mismatch, and raises `ValueError` if it was built for a different chromosome list
 
 ### Using bam2tensor efficiently when invoked from an agent
 

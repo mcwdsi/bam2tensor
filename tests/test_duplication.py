@@ -23,13 +23,11 @@ def test_duplication_bug(tmp_path):
         )
         f.write(seq + "\n")
 
-    # 2. Create the embedding with small window size
-    # Even though we removed window generation, we pass the param to ensure no error
+    # 2. Create the embedding
     emb = embedding.GenomeMethylationEmbedding(
         "test_genome",
         expected_chromosomes=["chr1"],
         fasta_source=str(fasta_path),
-        window_size=50,
         skip_cache=True,
         verbose=True,
     )

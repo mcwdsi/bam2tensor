@@ -8,6 +8,10 @@ there rather than in the repository checkout.
 import gzip
 import json
 import os
+import pickle
+import shutil
+import time
+import warnings
 
 import pytest
 
@@ -375,12 +379,64 @@ def test_cache_chromosome_mismatch_can_be_bypassed_with_skip_cache() -> None:
     assert emb.total_cpg_sites == len(emb.cpg_sites_dict["chr1"])
 
 
-def test_cache_window_size_mismatch() -> None:
-    """Test that mismatched window_size between cache and request raises ValueError."""
-    _make_embedding("window_test", window_size=150)
+# -- window_size is deprecated ---------------------------------------------------
 
-    with pytest.raises(ValueError, match="Window size does not match the cache"):
-        _make_embedding("window_test", window_size=200)  # Different!
+
+def test_window_size_is_deprecated_and_ignored() -> None:
+    """Passing window_size warns, and changes nothing about the embedding."""
+    reference = _make_embedding("window_reference", skip_cache=True)
+
+    with pytest.warns(DeprecationWarning, match="window_size") as recorded:
+        emb = _make_embedding("window_test", window_size=150, skip_cache=True)
+
+    assert len(recorded) == 1
+    assert emb.cpg_sites_dict == reference.cpg_sites_dict
+    assert emb.total_cpg_sites == reference.total_cpg_sites
+    assert not hasattr(emb, "window_size")
+
+
+def test_no_deprecation_warning_without_window_size() -> None:
+    """The default construction path is warning-free."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _make_embedding("no_window", skip_cache=True)
+
+
+def test_window_size_does_not_affect_the_cache() -> None:
+    """A cache is shared between callers that do and do not pass window_size.
+
+    The value used to be stored in the cache and compared on load, so two
+    callers disagreeing about an unused number could not share a cache.
+    """
+    _make_embedding("window_cache")
+    assert "window_size" not in _read_cache("window_cache.cache.json.gz")
+
+    with pytest.warns(DeprecationWarning):
+        emb = _make_embedding("window_cache", window_size=200)
+    assert emb.total_cpg_sites == TOTAL_CPG_SITES
+
+
+def test_cache_from_release_2_8_still_loads(capsys) -> None:
+    """A cache in the 2.8 on-disk format is accepted, not regenerated.
+
+    That format carries a ``window_size`` entry and no FASTA size /
+    modification-time stamp; it is validated by content hash instead.
+    """
+    _make_embedding("legacy_format")
+    cache_path = "legacy_format.cache.json.gz"
+    data = _read_cache(cache_path)
+    data["window_size"] = 150
+    for key in ("fasta_size", "fasta_mtime_ns", "fasta_stat_time_ns"):
+        del data[key]
+    _write_cache(cache_path, data)
+    capsys.readouterr()
+
+    emb = _make_embedding("legacy_format")
+
+    captured = capsys.readouterr()
+    assert "Loaded methylation embedding from cache" in captured.out
+    assert "Discarding" not in captured.out
+    assert emb.total_cpg_sites == TOTAL_CPG_SITES
 
 
 # -- Verbose output ------------------------------------------------------------
@@ -459,6 +515,12 @@ def test_cache_stamps_provenance() -> None:
     assert data["fasta_source"] == TEST_FASTA
     assert data["expected_chromosomes"] == CHROMOSOMES
 
+    # The FASTA's size and modification time, and when they were recorded.
+    fasta_stat = os.stat(TEST_FASTA)
+    assert data["fasta_size"] == fasta_stat.st_size
+    assert data["fasta_mtime_ns"] == fasta_stat.st_mtime_ns
+    assert abs(data["fasta_stat_time_ns"] - time.time_ns()) < 60 * 10**9
+
 
 def test_cache_rejected_on_fasta_sha256_mismatch(capsys) -> None:
     """A cache whose ``fasta_sha256`` no longer matches the current FASTA is discarded.
@@ -475,9 +537,13 @@ def test_cache_rejected_on_fasta_sha256_mismatch(capsys) -> None:
 
     # Tamper with the cached fasta_sha256 so it can no longer match
     # the on-disk FASTA. This simulates a user upgrading bam2tensor
-    # with an inherited v2.5 cache whose enumeration is stale.
+    # with an inherited cache that was built from a different FASTA —
+    # such a cache carries no size / modification-time stamp for the
+    # current file, so the content hash is what gets compared.
     data = _read_cache(cache_path)
     data["fasta_sha256"] = "0" * 64
+    for key in ("fasta_size", "fasta_mtime_ns", "fasta_stat_time_ns"):
+        del data[key]
     _write_cache(cache_path, data)
 
     # Second run: the stale cache must be rejected and regenerated.
@@ -711,3 +777,224 @@ def test_fasta_handle_is_closed_after_parsing(tmp_path) -> None:
     with pytest.raises(ValueError, match="not found in reference FASTA"):
         _make_embedding("handle_err", expected_chromosomes=["chrM"], skip_cache=True)
     gc.collect()  # surface any ResourceWarning from an unclosed handle now
+
+
+# -- Cache validation: size + modification time before content hash --------------
+
+
+def _private_fasta(tmp_path, age_seconds: float) -> str:
+    """Copy the test FASTA to ``tmp_path`` with an mtime ``age_seconds`` ago."""
+    fasta = tmp_path / "private.fa"
+    shutil.copy(TEST_FASTA, fasta)
+    mtime_ns = time.time_ns() - int(age_seconds * 10**9)
+    os.utime(fasta, ns=(mtime_ns, mtime_ns))
+    return str(fasta)
+
+
+@pytest.fixture
+def hash_calls(monkeypatch):
+    """Record every FASTA content hash the embedding module performs."""
+    calls = []
+    real = embedding.compute_fasta_sha256
+
+    def counting(fasta_source):
+        calls.append(fasta_source)
+        return real(fasta_source)
+
+    monkeypatch.setattr(embedding, "compute_fasta_sha256", counting)
+    return calls
+
+
+def test_cache_hit_does_not_rehash_unchanged_fasta(
+    tmp_path, hash_calls, capsys
+) -> None:
+    """An unchanged FASTA is recognised by size + mtime and is not re-read.
+
+    Hashing a multi-gigabyte reference on every run costs seconds to minutes
+    (far more on network storage) before any work starts.
+    """
+    fasta = _private_fasta(tmp_path, age_seconds=3600)
+
+    _make_embedding("stamp_hit", fasta_source=fasta)
+    assert hash_calls == [fasta]  # hashed once, to stamp the new cache
+    capsys.readouterr()
+
+    for _ in range(2):
+        emb = _make_embedding("stamp_hit", fasta_source=fasta)
+        assert "Loaded methylation embedding from cache" in capsys.readouterr().out
+        assert emb.total_cpg_sites == TOTAL_CPG_SITES
+    assert hash_calls == [fasta]  # ...and never again
+
+
+def test_cache_rehashes_when_fasta_is_touched(tmp_path, hash_calls, capsys) -> None:
+    """A new mtime with identical contents: re-hashed once, cache still valid."""
+    fasta = _private_fasta(tmp_path, age_seconds=3600)
+    _make_embedding("stamp_touch", fasta_source=fasta)
+    capsys.readouterr()
+
+    newer = time.time_ns() - 1800 * 10**9
+    os.utime(fasta, ns=(newer, newer))
+    _make_embedding("stamp_touch", fasta_source=fasta)
+
+    captured = capsys.readouterr()
+    assert "Loaded methylation embedding from cache" in captured.out
+    assert "Discarding" not in captured.out
+    assert len(hash_calls) == 2
+
+
+def test_cache_accepts_a_copy_of_the_same_fasta(tmp_path, hash_calls, capsys) -> None:
+    """A byte-identical FASTA at another path (other mtime) reuses the cache."""
+    fasta = _private_fasta(tmp_path, age_seconds=3600)
+    _make_embedding("stamp_copy", fasta_source=fasta)
+    capsys.readouterr()
+
+    copy = tmp_path / "elsewhere.fa"
+    shutil.copyfile(fasta, copy)  # fresh mtime
+    emb = _make_embedding("stamp_copy", fasta_source=str(copy))
+
+    assert "Loaded methylation embedding from cache" in capsys.readouterr().out
+    assert emb.fasta_source == str(copy)
+    assert len(hash_calls) == 2
+
+
+def test_cache_rejected_when_same_size_fasta_replaces_original(
+    tmp_path, hash_calls, capsys
+) -> None:
+    """Swapping in a different FASTA of identical size is caught by the hash.
+
+    This is the soft-masked vs. hard-masked case: same assembly, same file
+    size, different CpG content.
+    """
+    fasta = tmp_path / "ref.fa"
+    fasta.write_text(">chr1\nAACGAACGAA\n")
+    old = time.time_ns() - 3600 * 10**9
+    os.utime(fasta, ns=(old, old))
+    emb1 = _make_embedding(
+        "stamp_swap", expected_chromosomes=["chr1"], fasta_source=str(fasta)
+    )
+    assert emb1.cpg_sites_dict["chr1"] == [3, 7]
+    capsys.readouterr()
+
+    fasta.write_text(">chr1\nAACGAANNAA\n")  # same length, one CpG masked
+    emb2 = _make_embedding(
+        "stamp_swap", expected_chromosomes=["chr1"], fasta_source=str(fasta)
+    )
+
+    captured = capsys.readouterr()
+    assert "Discarding stale embedding cache" in captured.out
+    assert "FASTA SHA-256 mismatch" in captured.out
+    assert emb2.cpg_sites_dict["chr1"] == [3]
+
+
+def test_recently_modified_fasta_is_always_rehashed(tmp_path, hash_calls) -> None:
+    """A FASTA modified moments before the cache was written is not trusted by stamp.
+
+    A rewrite within one timestamp tick could leave size and mtime unchanged,
+    so the stamp is only trusted once the FASTA is safely older than the cache.
+    """
+    fasta = _private_fasta(tmp_path, age_seconds=0)
+
+    _make_embedding("stamp_racy", fasta_source=fasta)
+    _make_embedding("stamp_racy", fasta_source=fasta)
+
+    assert len(hash_calls) == 2  # stamped, then re-verified by content
+
+
+def test_fasta_with_future_mtime_is_rehashed(tmp_path, hash_calls) -> None:
+    """Clock skew (an mtime in the future) falls back to the content hash."""
+    fasta = _private_fasta(tmp_path, age_seconds=-3600)
+
+    _make_embedding("stamp_future", fasta_source=fasta)
+    _make_embedding("stamp_future", fasta_source=fasta)
+
+    assert len(hash_calls) == 2
+
+
+def test_verbose_reports_stamp_match(tmp_path, capsys) -> None:
+    """Verbose mode says when the stamp, rather than the hash, validated the cache."""
+    fasta = _private_fasta(tmp_path, age_seconds=3600)
+    _make_embedding("stamp_verbose", fasta_source=fasta)
+    capsys.readouterr()
+
+    _make_embedding("stamp_verbose", fasta_source=fasta, verbose=True)
+    assert "FASTA size and modification time match the cache" in capsys.readouterr().out
+
+
+# -- Column lookup without a per-position table -----------------------------------
+
+
+def test_chromosome_offsets(test_embeddings) -> None:
+    """chromosome_offsets gives the first column of each chromosome."""
+    for embedding_obj in test_embeddings:
+        offsets = embedding_obj.chromosome_offsets
+        assert list(offsets) == CHROMOSOMES
+        assert offsets["chr1"] == 0
+        assert offsets["chr2"] == len(embedding_obj.cpg_sites_dict["chr1"])
+        assert offsets["chr3"] == int(embedding_obj.cpgs_per_chr_cumsum[1])
+        for chrom, offset in offsets.items():
+            first = embedding_obj.cpg_sites_dict[chrom][0]
+            assert embedding_obj.genomic_position_to_embedding(chrom, first) == offset
+            assert isinstance(offset, int)
+
+
+def test_every_cpg_maps_to_its_own_column(test_embeddings) -> None:
+    """Exhaustive: the columns are exactly 0..N-1 in (chromosome, position) order."""
+    embedding_obj = test_embeddings[0]
+    columns = [
+        embedding_obj.genomic_position_to_embedding(chrom, pos)
+        for chrom in embedding_obj.expected_chromosomes
+        for pos in embedding_obj.cpg_sites_dict[chrom]
+    ]
+    assert columns == list(range(embedding_obj.total_cpg_sites))
+    assert all(type(column) is int for column in columns[::1009])
+
+
+def test_columns_follow_expected_chromosome_order() -> None:
+    """Column order follows expected_chromosomes, not FASTA record order."""
+    emb = _make_embedding(
+        "reordered", expected_chromosomes=["chr3", "chr1"], skip_cache=True
+    )
+    n_chr3 = len(emb.cpg_sites_dict["chr3"])
+
+    assert emb.chromosome_offsets == {"chr3": 0, "chr1": n_chr3}
+    assert emb.genomic_position_to_embedding("chr3", emb.cpg_sites_dict["chr3"][0]) == 0
+    assert (
+        emb.genomic_position_to_embedding("chr1", emb.cpg_sites_dict["chr1"][0])
+        == n_chr3
+    )
+    assert emb.embedding_to_genomic_position(n_chr3) == (
+        "chr1",
+        emb.cpg_sites_dict["chr1"][0],
+    )
+    # The CpG data itself is still stored in FASTA record order.
+    assert list(emb.cpg_sites_dict) == ["chr1", "chr3"]
+
+
+@pytest.mark.parametrize("offset", [-1, 1])
+def test_neighbours_of_a_cpg_are_not_columns(test_embeddings, offset) -> None:
+    """Positions adjacent to a CpG, and beyond either end, raise KeyError."""
+    embedding_obj = test_embeddings[0]
+    sites = embedding_obj.cpg_sites_dict["chr2"]
+    known = set(sites)
+    for pos in (sites[0], sites[len(sites) // 2], sites[-1]):
+        if pos + offset not in known:
+            with pytest.raises(KeyError):
+                embedding_obj.genomic_position_to_embedding("chr2", pos + offset)
+    with pytest.raises(KeyError):
+        embedding_obj.genomic_position_to_embedding("chr2", sites[-1] + 10**9)
+    with pytest.raises(KeyError):
+        embedding_obj.genomic_position_to_embedding("chr2", 0)
+
+
+def test_embedding_has_no_per_position_lookup_table(test_embeddings) -> None:
+    """The embedding stays compact: positions are stored once.
+
+    A second chromosome -> position -> column dict used to roughly triple the
+    embedding's memory. Pickled size is a stable proxy for that.
+    """
+    embedding_obj = test_embeddings[0]
+    assert not hasattr(embedding_obj, "chr_to_cpg_to_embedding_dict")
+
+    positions_only = pickle.dumps(embedding_obj.cpg_sites_dict)
+    whole = pickle.dumps(embedding_obj)
+    assert len(whole) < 1.2 * len(positions_only)
