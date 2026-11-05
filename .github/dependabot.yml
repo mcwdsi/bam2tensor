@@ -1,7 +1,10 @@
 version: 2
 updates:
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      # Composite actions are not scanned via "/"; list them explicitly.
+      - "/.github/actions/setup-env"
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 99

@@ -9,18 +9,31 @@ inputs:
 runs:
   using: composite
   steps:
+    # .github/workflows/constraints.txt is the single source of truth for the
+    # uv and Nox versions used in CI. Dependabot keeps it up to date.
+    - name: Read pinned uv version
+      id: pins
+      shell: bash
+      run: |
+        uv_version="$(sed -n 's/^uv==//p' .github/workflows/constraints.txt)"
+        if [ -z "$uv_version" ]; then
+          echo "::error::No uv pin found in .github/workflows/constraints.txt"
+          exit 1
+        fi
+        echo "uv=$uv_version" >> "$GITHUB_OUTPUT"
+
     - name: Install uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@v7
       with:
-        version: "0.10.6"
+        version: ${{ steps.pins.outputs.uv }}
 
     - name: Set up Python ${{ inputs.python-version }}
-      uses: actions/setup-python@v6.2.0
+      uses: actions/setup-python@v7.1.0
       with:
         python-version: ${{ inputs.python-version }}
 
     - name: Install Nox
       shell: bash
       run: |
-        uv tool install nox --with uv
+        uv tool install nox --with uv --constraints .github/workflows/constraints.txt
         nox --version

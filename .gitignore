@@ -137,6 +137,9 @@ dmypy.json
 
 *.json
 
+# bam2tensor CpG index caches (written to the working directory)
+*.cache.json.gz
+
 # Ignore large bioinformatic files
 *.bam
 *.bai
