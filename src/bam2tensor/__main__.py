@@ -27,6 +27,7 @@ import math
 import os
 import sys
 import time
+import warnings
 import click
 
 import scipy.sparse
@@ -39,6 +40,8 @@ from bam2tensor.functions import (
     extract_methylation_data_from_bam,
 )
 from bam2tensor.metadata import (
+    OUTPUT_FORMAT_VERSION,
+    OUTPUT_ROW_UNIT,
     compute_cpg_index_crc32,
     write_npz_metadata,
     write_npz_tlen,
@@ -160,19 +163,22 @@ def validate_input_output(
 
     Checks each BAM file in the list to ensure it can be read, and verifies
     that the corresponding output .methylation.npz file can be written.
-    Prints warnings if output files already exist and --overwrite is specified.
+    Running these checks up front means a permissions problem is reported
+    before any (potentially hours-long) extraction starts, rather than
+    when the first result is saved.
 
     Args:
         bams_to_process: List of paths to BAM files to validate.
-        overwrite: If True, allows overwriting existing output files.
-            If False and an output file exists, it will be skipped during
-            processing (not validated here).
+        overwrite: If True, existing output files will be overwritten, so
+            they must be writable. If False and an output file exists, it
+            will be skipped during processing (and is not validated here).
         output_dir: Optional output directory for .methylation.npz files.
             If None, output files are placed next to the input BAM files.
 
     Raises:
-        ValueError: If any input BAM file is not readable, or if the
-            output directory is not writable.
+        ValueError: If any input BAM file is not readable, if the output
+            directory is not writable, or if ``overwrite`` is set and an
+            existing output file is not writable.
 
     Note:
         Output files are named by replacing the .bam extension with
@@ -185,15 +191,17 @@ def validate_input_output(
 
         output_file = get_output_path(bam_file, output_dir)
         if os.path.exists(output_file):
-            if overwrite and os.access(output_file, os.W_OK):
-                pass  # Silently allow; the per-BAM output will show the overwrite
-        else:
-            if not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
-                raise ValueError(f"Output file path is not writable: {output_file}")
+            # Without --overwrite the BAM is skipped, so nothing is written.
+            if overwrite and not os.access(output_file, os.W_OK):
+                raise ValueError(
+                    f"Output file exists and is not writable: {output_file}"
+                )
+        elif not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
+            raise ValueError(f"Output file path is not writable: {output_file}")
 
 
 @click.command(
-    help="Extract read-level methylation data from an aligned bisulfite-seq or EM-seq .bam file and export the data as a SciPy sparse matrix."
+    help="Extract per-fragment methylation data from an aligned bisulfite-seq or EM-seq .bam file and export the data as a SciPy sparse matrix (one row per sequenced DNA fragment)."
 )
 @click.version_option()
 @click.option(
@@ -232,17 +240,19 @@ def validate_input_output(
 @click.option(
     "--filter-non-converted",
     help=(
-        "Drop reads with >= --non-converted-threshold retained non-CpG "
-        "cytosines, the signature of incomplete bisulfite/EM-seq conversion "
-        "(port of nebiolabs/mark-nonconverted-reads). Default: off."
+        "Drop fragments in which a read has >= --non-converted-threshold "
+        "retained non-CpG cytosines, the signature of incomplete "
+        "bisulfite/EM-seq conversion (port of "
+        "nebiolabs/mark-nonconverted-reads). Default: off."
     ),
     is_flag=True,
 )
 @click.option(
     "--non-converted-threshold",
     help=(
-        "Minimum count of retained non-CpG cytosines to drop a read "
-        "(default = 3, matches NEB mark-nonconverted-reads)."
+        "Minimum count of retained non-CpG cytosines in a read for its "
+        "fragment to be dropped (default = 3, matches NEB "
+        "mark-nonconverted-reads)."
     ),
     default=3,
     type=int,
@@ -250,7 +260,7 @@ def validate_input_output(
 @click.option(
     "--filter-em-overconversion",
     help=(
-        "Drop EM-seq reads whose covered CpGs are all called unmethylated "
+        "Drop EM-seq fragments whose covered CpGs are all called unmethylated "
         "and cover at least --em-overconversion-min-cpgs sites (heuristic "
         "for the fragment-level over-conversion artifact described in "
         "Loyfer et al. bioRxiv 2026.03.24.713040). Default: off."
@@ -261,7 +271,7 @@ def validate_input_output(
     "--em-overconversion-min-cpgs",
     help=(
         "Minimum covered CpG count required before the EM over-conversion "
-        "filter will drop a read (default = 3)."
+        "filter will drop a fragment (default = 3)."
     ),
     default=3,
     type=int,
@@ -328,7 +338,7 @@ def main(
     """Extract methylation data from BAM files and save as sparse matrices.
 
     Main entry point for the bam2tensor CLI. Processes one or more BAM files,
-    extracting read-level CpG methylation data and saving the results as
+    extracting per-fragment CpG methylation data and saving the results as
     SciPy sparse COO matrices in .npz format.
 
     The workflow is:
@@ -337,7 +347,7 @@ def main(
         3. Validate input/output permissions
         4. For each BAM file:
            a. Extract methylation states from aligned reads
-           b. Build a sparse matrix (rows=reads, columns=CpG sites)
+           b. Build a sparse matrix (rows=fragments, columns=CpG sites)
            c. Save to .methylation.npz file
 
     Args:
@@ -354,17 +364,17 @@ def main(
             ``--download-reference`` is used.
         quality_limit: Minimum mapping quality (MAPQ) threshold. Reads below
             this quality are excluded.
-        filter_non_converted: If True, drop reads with at least
-            ``non_converted_threshold`` retained non-CpG cytosines —
-            indicating incomplete bisulfite/EM-seq conversion.
+        filter_non_converted: If True, drop fragments in which a read
+            has at least ``non_converted_threshold`` retained non-CpG
+            cytosines — indicating incomplete bisulfite/EM-seq conversion.
         non_converted_threshold: Threshold used by the non-converted
             read filter.
-        filter_em_overconversion: If True, drop reads whose covered CpGs
-            are all called unmethylated and cover at least
+        filter_em_overconversion: If True, drop fragments whose covered
+            CpGs are all called unmethylated and cover at least
             ``em_overconversion_min_cpgs`` sites — heuristic for EM-seq
             fragment-level over-conversion (Loyfer et al. 2026).
         em_overconversion_min_cpgs: Minimum covered CpG count required
-            before the over-conversion filter will drop a read.
+            before the over-conversion filter will drop a fragment.
         threads: Number of worker processes for per-chromosome
             extraction. Default 1.
         verbose: If True, print detailed progress information.
@@ -383,10 +393,19 @@ def main(
         UsageError: If neither ``--reference-fasta`` nor
             ``--download-reference`` is specified, or if ``--genome-name``
             is missing when not using ``--download-reference``.
+        ClickException: If the CpG site index cannot be built for the
+            requested configuration (for example, an expected chromosome
+            is absent from the reference FASTA, or the cache on disk was
+            built for a different chromosome list).
 
     Note:
         This function is decorated with Click options and is typically
         invoked via the command line rather than called directly.
+
+        A BAM that cannot be processed (missing index, chromosome names
+        that do not match the reference, unreadable file) is reported and
+        skipped so the remaining BAMs still run. If any BAM failed, the
+        process exits with status 1 after printing the summary.
     """
     # Handle --list-genomes: print available genomes and exit
     if list_genomes:
@@ -469,13 +488,19 @@ def main(
 
     # ── Load CpG index ──────────────────────────────────────────────────
     print(f"Loading CpG site index for {genome_name}...")
-    genome_methylation_embedding = GenomeMethylationEmbedding(
-        genome_name=genome_name,
-        expected_chromosomes=chrom_list,
-        fasta_source=reference_fasta,
-        skip_cache=skip_cache,
-        verbose=verbose,
-    )
+    try:
+        genome_methylation_embedding = GenomeMethylationEmbedding(
+            genome_name=genome_name,
+            expected_chromosomes=chrom_list,
+            fasta_source=reference_fasta,
+            skip_cache=skip_cache,
+            verbose=verbose,
+        )
+    except ValueError as e:
+        # Configuration problems (chromosome names absent from the FASTA, a
+        # cache built for a different chromosome list): report the message,
+        # not a traceback.
+        raise click.ClickException(str(e)) from e
     n_chroms = len(genome_methylation_embedding.cpg_sites_dict)
     cpg_crc32 = compute_cpg_index_crc32(genome_methylation_embedding)
     print(
@@ -523,29 +548,40 @@ def main(
         # Extract
         print("  Extracting methylation data...")
         try:
-            extraction_result = extract_methylation_data_from_bam(
-                input_bam=input_bam,
-                genome_methylation_embedding=genome_methylation_embedding,
-                quality_limit=quality_limit,
-                filter_non_converted=filter_non_converted,
-                non_converted_threshold=non_converted_threshold,
-                filter_em_overconversion=filter_em_overconversion,
-                em_overconversion_min_cpgs=em_overconversion_min_cpgs,
-                threads=threads,
-                verbose=verbose,
-                debug=debug,
-            )
-        except FileNotFoundError as e:
+            # Record warnings raised during extraction (e.g. the non-converted
+            # filter could not evaluate reads lacking an MD tag) so they are
+            # shown with this BAM's report rather than as a raw Python warning.
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always", RuntimeWarning)
+                extraction_result = extract_methylation_data_from_bam(
+                    input_bam=input_bam,
+                    genome_methylation_embedding=genome_methylation_embedding,
+                    quality_limit=quality_limit,
+                    filter_non_converted=filter_non_converted,
+                    non_converted_threshold=non_converted_threshold,
+                    filter_em_overconversion=filter_em_overconversion,
+                    em_overconversion_min_cpgs=em_overconversion_min_cpgs,
+                    threads=threads,
+                    verbose=verbose,
+                    debug=debug,
+                )
+        except (OSError, ValueError) as e:
+            # Problems with this particular BAM (missing index, chromosome
+            # names that do not match the reference, unreadable/truncated
+            # file). Report it and carry on, so one bad file does not abort a
+            # whole directory run; the exit status reflects the failure.
             print(f"  ERROR: {e}")
             errors_list.append(e)
             continue
+        for caught in caught_warnings:
+            print(f"  WARNING: {caught.message}")
 
         # Matrix stats
-        n_reads = extraction_result.matrix.shape[0]
+        n_fragments = extraction_result.matrix.shape[0]
         n_cpgs = extraction_result.matrix.shape[1]
         n_data = extraction_result.matrix.nnz
         print(
-            f"  Result:        {n_reads:,} reads x {n_cpgs:,} CpG sites"
+            f"  Result:        {n_fragments:,} fragments x {n_cpgs:,} CpG sites"
             f" ({n_data:,} data points)"
         )
 
@@ -556,6 +592,8 @@ def main(
             output_file,
             {
                 "bam2tensor_version": __version__,
+                "format_version": OUTPUT_FORMAT_VERSION,
+                "row_unit": OUTPUT_ROW_UNIT,
                 "genome_name": genome_name,
                 "expected_chromosomes": chrom_list,
                 "total_cpg_sites": genome_methylation_embedding.total_cpg_sites,
@@ -590,6 +628,11 @@ def main(
             print(f"                 - {error}")
     print(f"  Total time:    {_format_elapsed(time.time() - time_start)}")
     print("=" * 72)
+
+    # A run in which any BAM failed must not look like a success to a
+    # scheduler or pipeline.
+    if errors_list:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

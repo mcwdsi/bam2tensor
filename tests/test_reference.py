@@ -63,9 +63,15 @@ def test_get_cache_dir_default(tmp_path):
     """get_cache_dir uses ~/.cache when XDG_CACHE_HOME is not set."""
     env = os.environ.copy()
     env.pop("XDG_CACHE_HOME", None)
-    with patch.dict(os.environ, env, clear=True):
+    # Point "home" at a temporary directory: get_cache_dir() creates the
+    # directory it returns, and a test must not do that in the real home.
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch("bam2tensor.reference.Path.home", return_value=tmp_path),
+    ):
         cache_dir = get_cache_dir()
-        assert "bam2tensor" in str(cache_dir)
+    assert cache_dir == tmp_path / ".cache" / "bam2tensor"
+    assert cache_dir.is_dir()
 
 
 def test_get_cached_reference_missing(tmp_path):
@@ -134,6 +140,11 @@ def _create_fake_gzipped_fasta(path, content=">chr1\nACGTCGACGT\n"):
         f.write(content)
 
 
+def _genome_dir_contents(cache_home, genome_name="hg38"):
+    """Helper: sorted file names in a genome's cache directory."""
+    return sorted(os.listdir(cache_home / "bam2tensor" / genome_name))
+
+
 def test_download_reference_downloads_and_decompresses(tmp_path):
     """download_reference downloads, decompresses, and validates a FASTA."""
     with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
@@ -152,6 +163,10 @@ def test_download_reference_downloads_and_decompresses(tmp_path):
         # Compressed file should be removed
         gz_path = result.parent / "hg38.fa.gz"
         assert not gz_path.exists()
+        # ...along with every temporary file: only the finished FASTA remains.
+        assert _genome_dir_contents(tmp_path) == ["hg38.fa"]
+        # And the next call is served from the cache.
+        assert get_cached_reference("hg38") == result
 
 
 def test_download_reference_verbose_with_progress_bar(tmp_path):
@@ -186,6 +201,8 @@ def test_download_reference_invalid_fasta(tmp_path):
         # Invalid file should be cleaned up
         fasta_path = tmp_path / "bam2tensor" / "hg38" / "hg38.fa"
         assert not fasta_path.exists()
+        assert _genome_dir_contents(tmp_path) == []
+        assert get_cached_reference("hg38") is None
 
 
 def test_download_progress_bar_update_to():
@@ -204,3 +221,96 @@ def test_download_progress_bar_update_to_no_total():
     assert bar.total == 100  # unchanged
     assert bar.n == 20
     bar.close()
+
+
+# -- Failed downloads must not leave a usable-looking FASTA behind -------------
+
+
+def test_download_reference_truncated_download_is_not_cached(tmp_path):
+    """A download cut short mid-stream raises and caches nothing.
+
+    Regression: the FASTA used to be decompressed straight to its final name,
+    so a truncated download left a partial ``hg38.fa`` that every later run
+    accepted as the cached genome.
+    """
+    with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
+
+        def fake_urlretrieve(url, dest, reporthook=None):
+            # A real multi-record FASTA, gzipped, with the tail cut off.
+            payload = ">chr1\n" + "ACGTCGACGT" * 5000 + "\n>chr2\n" + "ACGT" * 5000
+            complete = gzip.compress(payload.encode())
+            with open(dest, "wb") as f:
+                f.write(complete[: len(complete) // 2])
+            return dest, {}
+
+        with patch("bam2tensor.reference.urllib.request.urlretrieve", fake_urlretrieve):
+            with pytest.raises(OSError, match="truncated or corrupt"):
+                download_reference("hg38", verbose=False)
+
+        assert _genome_dir_contents(tmp_path) == []
+        assert get_cached_reference("hg38") is None
+
+
+def test_download_reference_network_failure_is_not_cached(tmp_path):
+    """A download that fails part-way cleans up and caches nothing."""
+    with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
+
+        def fake_urlretrieve(url, dest, reporthook=None):
+            with open(dest, "wb") as f:
+                f.write(b"\x1f\x8b partial")  # some bytes arrived...
+            raise ConnectionResetError("connection reset by peer")  # ...then it died
+
+        with patch("bam2tensor.reference.urllib.request.urlretrieve", fake_urlretrieve):
+            with pytest.raises(ConnectionResetError):
+                download_reference("hg38", verbose=False)
+
+        assert _genome_dir_contents(tmp_path) == []
+        assert get_cached_reference("hg38") is None
+
+
+def test_download_reference_retry_after_failure_succeeds(tmp_path):
+    """After a failed attempt, the next call downloads again and succeeds."""
+    with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
+        attempts = []
+
+        def flaky_urlretrieve(url, dest, reporthook=None):
+            attempts.append(dest)
+            if len(attempts) == 1:
+                with open(dest, "wb") as f:
+                    f.write(gzip.compress(b">chr1\nACGT\n")[:10])
+            else:
+                _create_fake_gzipped_fasta(dest)
+            return dest, {}
+
+        with patch(
+            "bam2tensor.reference.urllib.request.urlretrieve", flaky_urlretrieve
+        ):
+            with pytest.raises(OSError):
+                download_reference("hg38", verbose=False)
+            result = download_reference("hg38", verbose=False)
+
+        assert len(attempts) == 2
+        assert result.read_text().startswith(">chr1")
+        assert _genome_dir_contents(tmp_path) == ["hg38.fa"]
+
+
+def test_download_reference_downloads_to_temporary_name(tmp_path):
+    """The download never touches the final FASTA path until it is complete."""
+    with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
+        seen = {}
+
+        def fake_urlretrieve(url, dest, reporthook=None):
+            seen["dest"] = dest
+            seen["final_exists_during_download"] = (
+                tmp_path / "bam2tensor" / "hg38" / "hg38.fa"
+            ).exists()
+            _create_fake_gzipped_fasta(dest)
+            return dest, {}
+
+        with patch("bam2tensor.reference.urllib.request.urlretrieve", fake_urlretrieve):
+            result = download_reference("hg38", verbose=False)
+
+        assert seen["dest"] != str(result)
+        assert seen["dest"].endswith(".part")
+        assert seen["final_exists_during_download"] is False
+        assert result.exists()

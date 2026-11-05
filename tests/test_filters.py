@@ -1,7 +1,10 @@
 """Tests for the opt-in non-converted and EM over-conversion read filters."""
 
+import warnings
+
 import numpy as np
 import pysam
+import pytest
 import scipy.sparse
 
 from bam2tensor import __version__, embedding, functions
@@ -17,6 +20,7 @@ from bam2tensor.metadata import (
     write_npz_metadata,
     write_npz_tlen,
 )
+from tests.paths import TEST_BAM, TEST_FASTA
 
 # ---------------------------------------------------------------------------
 # Helpers: build a tmp FASTA + BAM with one or more reads
@@ -552,12 +556,12 @@ def test_default_flags_match_pre_change_behavior() -> None:
     emb = embedding.GenomeMethylationEmbedding(
         genome_name="test_regression",
         expected_chromosomes=["chr1", "chr2", "chr3"],
-        fasta_source="tests/test_fasta.fa",
+        fasta_source=TEST_FASTA,
         skip_cache=True,
         verbose=False,
     )
     r = functions.extract_methylation_data_from_bam(
-        input_bam="tests/test.bam",
+        input_bam=TEST_BAM,
         genome_methylation_embedding=emb,
         quality_limit=20,
     )
@@ -566,3 +570,160 @@ def test_default_flags_match_pre_change_behavior() -> None:
     assert r.matrix.shape == (1, 37489)
     assert r.matrix.nnz == 3
     assert len(r.tlen) == 1
+
+
+# ---------------------------------------------------------------------------
+# Non-converted filter: reads that cannot be evaluated (no MD tag)
+# ---------------------------------------------------------------------------
+
+
+def _biscuit_non_converted_bam(tmp_path, name: str, with_md: bool, n_reads: int = 1):
+    """A Biscuit-style BAM of fully non-converted reads, with or without MD.
+
+    The reference has 4 isolated non-CpG Cs and one CpG; each read matches the
+    reference exactly, so all 4 non-CpG Cs are retained (>= the default
+    threshold of 3).
+    """
+    ref_seq = "N" * 5 + "CCCC" + "N" * 5 + "CG" + "N" * 6
+    emb = _make_embedding(tmp_path, ref_seq, name)
+    spec = {
+        "query_sequence": ref_seq.replace("N", "A"),
+        "reference_start": 0,
+        "yd": "f",
+    }
+    if with_md:
+        spec["md"] = str(len(ref_seq))
+    reads = [dict(spec, query_name=f"read{i}") for i in range(n_reads)]
+    return emb, _write_bam(tmp_path, len(ref_seq), reads)
+
+
+def test_non_converted_filter_warns_when_md_tag_missing(tmp_path) -> None:
+    """Without MD the filter cannot run; it must say so instead of silently passing.
+
+    Regression: on a BAM without MD tags ``--filter-non-converted`` quietly
+    kept every read — indistinguishable from a clean sample.
+    """
+    emb, bam_path = _biscuit_non_converted_bam(
+        tmp_path, "md_missing", with_md=False, n_reads=3
+    )
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=bam_path,
+            genome_methylation_embedding=emb,
+            filter_non_converted=True,
+        )
+
+    # Exactly one warning, reporting how many reads were affected and the fix.
+    assert len(recorded) == 1
+    message = str(recorded[0].message)
+    assert "3 read(s)" in message
+    assert bam_path in message
+    assert "no MD tag" in message
+    assert "samtools calmd" in message
+
+    # The unevaluable reads are kept rather than dropped.
+    assert result.matrix.shape[0] == 3
+
+
+def test_non_converted_filter_md_warning_counts_across_workers(tmp_path) -> None:
+    """The count of unevaluable reads is aggregated from worker processes."""
+    emb, bam_path = _biscuit_non_converted_bam(
+        tmp_path, "md_missing_parallel", with_md=False, n_reads=5
+    )
+    with pytest.warns(RuntimeWarning, match=r"5 read\(s\).*no MD tag"):
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=bam_path,
+            genome_methylation_embedding=emb,
+            filter_non_converted=True,
+            threads=2,
+        )
+    assert result.matrix.shape[0] == 5
+
+
+def test_no_md_warning_when_md_present_or_filter_off(tmp_path) -> None:
+    """No warning when the filter can run, or when it was not requested."""
+    emb_md, bam_md = _biscuit_non_converted_bam(tmp_path, "md_ok", with_md=True)
+    md_free = tmp_path / "md_free"
+    md_free.mkdir()
+    emb_no_md, bam_no_md = _biscuit_non_converted_bam(md_free, "md_off", with_md=False)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+
+        # MD present: the filter evaluates (and drops) the read, silently.
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=bam_md,
+            genome_methylation_embedding=emb_md,
+            filter_non_converted=True,
+        )
+        assert result.matrix.shape[0] == 0
+
+        # MD absent but the filter is off: nothing to warn about.
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=bam_no_md,
+            genome_methylation_embedding=emb_no_md,
+            filter_non_converted=False,
+        )
+        assert result.matrix.shape[0] == 1
+
+
+def test_no_md_warning_for_bismark_reads(tmp_path) -> None:
+    """Bismark reads are filtered via XM and never need (or warn about) MD."""
+    ref_seq = "N" * 5 + "CCCC" + "N" * 5 + "CG" + "N" * 6
+    emb = _make_embedding(tmp_path, ref_seq, "bismark_no_md")
+    xm = "." * 5 + "HHHH" + "." * 5 + "Z." + "." * 6
+    bam_path = _write_bam(
+        tmp_path,
+        len(ref_seq),
+        [
+            {
+                "query_name": "bismark_read",
+                "query_sequence": ref_seq.replace("N", "A"),
+                "reference_start": 0,
+                "xm": xm,  # no MD tag
+            }
+        ],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=bam_path,
+            genome_methylation_embedding=emb,
+            filter_non_converted=True,
+        )
+    assert result.matrix.shape[0] == 0  # dropped: 4 retained non-CpG Cs
+
+
+def test_cli_reports_md_warning_per_bam(tmp_path) -> None:
+    """The CLI shows the MD warning in the BAM's own report section."""
+    from click.testing import CliRunner
+
+    from bam2tensor import __main__
+
+    _, bam_path = _biscuit_non_converted_bam(
+        tmp_path, "md_cli", with_md=False, n_reads=2
+    )
+    result = CliRunner().invoke(
+        __main__.main,
+        [
+            "--input-path",
+            bam_path,
+            "--reference-fasta",
+            str(tmp_path / "ref.fa"),
+            "--genome-name",
+            "md_cli",
+            "--expected-chromosomes",
+            "chr1",
+            "--filter-non-converted",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "WARNING: 2 read(s)" in result.output
+    assert "no MD tag" in result.output
+    # A warning is not an error: the BAM is still processed and written.
+    assert "Processed:     1 BAM(s)" in result.output
+    assert (tmp_path / "out" / "test.methylation.npz").exists()

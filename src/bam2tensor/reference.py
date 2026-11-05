@@ -143,6 +143,12 @@ def download_reference(genome_name: str, verbose: bool = False) -> Path:
     directory. If the genome has already been downloaded, returns the
     path to the cached file without re-downloading.
 
+    The download and decompression happen in temporary files next to the
+    final location; the FASTA only appears under its final name once it
+    has been fully decompressed and validated. An interrupted or failed
+    download therefore never leaves a partial file that a later run
+    would mistake for a complete cached genome.
+
     Args:
         genome_name: The genome identifier to download. Must be one of
             the keys in KNOWN_GENOMES (e.g., "hg38", "hg19", "mm10",
@@ -156,8 +162,8 @@ def download_reference(genome_name: str, verbose: bool = False) -> Path:
     Raises:
         ValueError: If genome_name is not a recognized genome in
             KNOWN_GENOMES.
-        OSError: If the download fails due to network issues or
-            insufficient disk space.
+        OSError: If the downloaded file is truncated, corrupt, or does
+            not look like a FASTA.
 
     Example:
         >>> # xdoctest: +SKIP
@@ -182,8 +188,12 @@ def download_reference(genome_name: str, verbose: bool = False) -> Path:
     cache_dir = get_cache_dir() / genome_name
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    gz_path = cache_dir / f"{genome_name}.fa.gz"
     fasta_path = cache_dir / f"{genome_name}.fa"
+    # Work in per-process temporary files and rename into place at the end.
+    # (Plain names rather than tempfile.mkstemp, so the final FASTA keeps the
+    # normal umask-derived permissions and shared caches stay readable.)
+    tmp_gz_path = cache_dir / f"{genome_name}.fa.gz.{os.getpid()}.part"
+    tmp_fasta_path = cache_dir / f"{genome_name}.fa.{os.getpid()}.part"
 
     url = genome_info["url"]
     description = genome_info["description"]
@@ -192,34 +202,46 @@ def download_reference(genome_name: str, verbose: bool = False) -> Path:
     print(f"Saving to: {cache_dir}")
     print("This may take a while for large genomes (~1 GB compressed)...")
 
-    if verbose:
-        with _DownloadProgressBar(
-            unit="B", unit_scale=True, miniters=1, desc=genome_name
-        ) as progress:
-            urllib.request.urlretrieve(  # noqa: S310
-                url, str(gz_path), reporthook=progress.update_to
-            )
-    else:
-        urllib.request.urlretrieve(url, str(gz_path))  # noqa: S310
+    try:
+        if verbose:
+            with _DownloadProgressBar(
+                unit="B", unit_scale=True, miniters=1, desc=genome_name
+            ) as progress:
+                urllib.request.urlretrieve(  # noqa: S310
+                    url, str(tmp_gz_path), reporthook=progress.update_to
+                )
+        else:
+            urllib.request.urlretrieve(url, str(tmp_gz_path))  # noqa: S310
 
-    print("Download complete. Decompressing...")
+        print("Download complete. Decompressing...")
 
-    with gzip.open(gz_path, "rb") as f_in:
-        with open(fasta_path, "wb") as f_out:
-            shutil.copyfileobj(f_in, f_out)
+        try:
+            with gzip.open(tmp_gz_path, "rb") as f_in:
+                with open(tmp_fasta_path, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+        except EOFError as exc:
+            raise OSError(
+                f"Downloaded file for {genome_name} is truncated or corrupt "
+                f"({exc}). Please retry."
+            ) from exc
 
-    # Remove the compressed file to save disk space
-    gz_path.unlink()
-
-    # Validate the downloaded file looks like a FASTA
-    with open(fasta_path) as f:
-        first_line = f.readline()
+        # Validate the downloaded file looks like a FASTA
+        with open(tmp_fasta_path) as f:
+            first_line = f.readline()
         if not first_line.startswith(">"):
-            fasta_path.unlink()
             raise OSError(
                 f"Downloaded file does not appear to be a valid FASTA "
                 f"(first line: {first_line[:50]!r})"
             )
+
+        # Atomic: the cached FASTA exists only once it is complete and valid.
+        os.replace(tmp_fasta_path, fasta_path)
+    finally:
+        # Remove the compressed download (to save disk space) and any
+        # partial output left by a failure.
+        for tmp_path in (tmp_gz_path, tmp_fasta_path):
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     print(f"Reference genome ready: {fasta_path}")
     return fasta_path

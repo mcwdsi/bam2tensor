@@ -6,6 +6,22 @@ is stored as a ``metadata.json`` entry appended to the ZIP archive that
 underlies every ``.npz`` file.  ``scipy.sparse.load_npz`` silently ignores
 this extra entry, so existing downstream code is unaffected.
 
+Output format versions:
+    The ``format_version`` metadata entry identifies how the matrix in a
+    file is laid out, independently of the bam2tensor release that wrote it
+    (see :data:`OUTPUT_FORMAT_VERSION`):
+
+    - **2** — One row per sequenced DNA fragment (``"row_unit":
+      "fragment"``). The two mates of a read pair are combined into a
+      single row, and every read is decoded on the base that carries its
+      call, so both strands of every aligner dialect are represented.
+      ``tlen`` holds the fragment length (absolute BAM TLEN).
+    - **1** — Files with no ``format_version`` entry (releases up to and
+      including 2.8). One row per read. For Bismark BAMs both mates were
+      separate rows and calls from bottom-strand alignments were recorded
+      as ``-1``; for Biscuit, bwameth and gem3 BAMs only read 1 of each
+      pair was used. ``tlen`` holds the signed BAM TLEN of each read.
+
 Example:
     Writing metadata (done automatically by the CLI)::
 
@@ -35,6 +51,15 @@ import zlib
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+# Layout version of the matrix written to ``.methylation.npz`` files, stored
+# as ``format_version`` in the embedded metadata. Increment it whenever the
+# meaning of rows, columns, values or ``tlen`` changes; the module docstring
+# lists what each version means.
+OUTPUT_FORMAT_VERSION = 2
+
+# What a matrix row represents in the current format (``row_unit``).
+OUTPUT_ROW_UNIT = "fragment"
 
 if TYPE_CHECKING:
     # Avoid a runtime circular import: embedding.py imports compute_fasta_sha256
@@ -72,6 +97,12 @@ def compute_cpg_index_crc32(embedding: "GenomeMethylationEmbedding") -> str:
     positions are CpG sites within each chromosome.  Two embeddings with
     the same checksum will produce identical column semantics.
 
+    The checksum is defined over the text ``chrom\tpos1,pos2,...``, one
+    line per chromosome in ``expected_chromosomes`` order, joined by
+    newlines. It is computed incrementally, one chromosome at a time, so
+    the whole-genome text (hundreds of megabytes for a human reference)
+    is never held in memory at once.
+
     Args:
         embedding: A fully initialised GenomeMethylationEmbedding whose
             ``cpg_sites_dict`` is populated.
@@ -90,14 +121,18 @@ def compute_cpg_index_crc32(embedding: "GenomeMethylationEmbedding") -> str:
         >>> compute_cpg_index_crc32(emb)
         'a1b2c3d4'
     """
-    # Build a deterministic byte representation:
-    #   chrom\tpos1,pos2,...\n  (one line per chromosome, in order)
-    parts: list[str] = []
-    for chrom in embedding.expected_chromosomes:
+    # Deterministic byte representation:
+    #   chrom\tpos1,pos2,...  (one line per chromosome, in order, joined by \n)
+    # zlib.crc32 accepts a running value, so feeding it line by line gives
+    # exactly the checksum of the concatenated text.
+    crc = 0
+    for index, chrom in enumerate(embedding.expected_chromosomes):
         positions = embedding.cpg_sites_dict.get(chrom, [])
-        parts.append(chrom + "\t" + ",".join(str(p) for p in positions))
-    payload = "\n".join(parts).encode("utf-8")
-    return format(zlib.crc32(payload) & 0xFFFFFFFF, "08x")
+        line = chrom + "\t" + ",".join(map(str, positions))
+        if index:
+            crc = zlib.crc32(b"\n", crc)
+        crc = zlib.crc32(line.encode("utf-8"), crc)
+    return format(crc & 0xFFFFFFFF, "08x")
 
 
 def write_npz_metadata(
@@ -153,7 +188,7 @@ def write_npz_tlen(npz_path: str, tlen: np.ndarray) -> None:
 
     Args:
         npz_path: Path to the ``.npz`` file (must already exist).
-        tlen: A 1-D numpy array of per-read template lengths.
+        tlen: A 1-D numpy array of template lengths, one per matrix row.
 
     Example:
         >>> # xdoctest: +SKIP
@@ -172,9 +207,11 @@ def read_npz_tlen(npz_path: str) -> np.ndarray | None:
         npz_path: Path to the ``.npz`` file.
 
     Returns:
-        The per-read template-length array, or ``None`` if the file does
-        not contain a ``tlen.npy`` entry (e.g. files produced by older
-        versions).
+        The template-length array (one entry per matrix row), or ``None``
+        if the file does not contain a ``tlen.npy`` entry (e.g. files
+        produced by older versions). In format version 2 files the values
+        are fragment lengths (non-negative); in earlier files they are
+        the signed BAM TLEN of each read.
 
     Example:
         >>> # xdoctest: +SKIP
