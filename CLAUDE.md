@@ -49,9 +49,15 @@ src/bam2tensor/
   reference.py     # Reference genome download and caching utilities
 
 tests/
+  conftest.py         # Runs every test in its own temporary working directory
+  paths.py            # Absolute paths to the bundled fixtures (TEST_BAM, TEST_FASTA, ...)
+  simulate.py         # Bisulfite read simulator with known per-CpG truth
   test_main.py        # CLI tests
   test_functions.py   # Core function tests
   test_embedding.py   # Embedding class tests
+  test_filters.py     # Non-converted / EM over-conversion filter tests
+  test_parallel.py    # --threads parallel extraction tests
+  test_simulated.py   # End-to-end tests against simulated reads with known truth
   test_duplication.py  # Read duplication bug tests
   test_inspect.py     # Inspect CLI tests
   test_metadata.py    # Metadata read/write/round-trip tests
@@ -105,6 +111,8 @@ xdoctest validates code examples in docstrings. Important rules:
 - Test framework: pytest
 - Tests are in `tests/` directory
 - Test fixtures: `test.bam`, `test.bam.bai`, `test_fasta.fa`
+- **Tests run in a temporary working directory** (autouse fixture in `tests/conftest.py`), so cache files and default outputs never land in the checkout. Refer to bundled fixtures through the absolute-path constants in `tests/paths.py` (`TEST_BAM`, `TEST_BAM_INDEX`, `TEST_FASTA`), never by a path relative to the repo root.
+- **`test.bam` barely overlaps `test_fasta.fa`** (real hg38 alignments vs. a 700 kb reference; one read survives extraction). For tests that need many reads with known answers, use `tests/simulate.py`: `simulate_bam()` writes an indexed Biscuit- or Bismark-style BAM from `test_fasta.fa` and returns the per-read ground truth. See `tests/test_simulated.py`.
 - Run tests across Python 3.11, 3.12, 3.13 via nox
 - Coverage reporting enabled (minimum threshold: 10%)
 - **Typeguard**: `nox --session=typeguard` runs runtime type checking. All function arguments must match their type annotations exactly — pass `str`, not `Path`, when the signature says `str`. This catches real bugs that mypy misses (e.g., passing `pathlib.PosixPath` to a `str` parameter).
@@ -196,7 +204,8 @@ When working on this codebase as an AI coding agent:
 - **Do not add exceptions to `Raises:`** that are not explicitly raised with a `raise` statement in that function
 - **Run `nox --session=xdoctest`** to validate docstring examples; use `# xdoctest: +SKIP` for examples requiring external files
 - **Test BAM**: `tests/test.bam` uses chromosomes `chr1`, `chr2`, `chr3` matching `tests/test_fasta.fa`
-- **Creating test BAMs**: Follow the pattern in `tests/test_duplication.py` (pysam to create BAMs, then `pysam.index()`)
+- **Creating test BAMs**: Follow the pattern in `tests/test_duplication.py` (pysam to create BAMs, then `pysam.index()`) for hand-built edge cases; use `tests/simulate.py` when you need realistic read sets with known truth
+- **CLI exit status**: `bam2tensor` exits 1 if any BAM in the run failed (it still processes the others). Check the exit status, not just the output, when scripting it
 - **Dependency management**: Uses `uv` (not pip/poetry)
 - **Type checking**: mypy with `strict = false` but `check_untyped_defs = true`
 - **Do not modify** `noxfile.py` (excluded from ruff checks)

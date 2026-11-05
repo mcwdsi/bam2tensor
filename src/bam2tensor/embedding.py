@@ -39,6 +39,7 @@ Attributes:
 import gzip
 import json
 import os
+import zlib
 
 import numpy as np
 
@@ -47,6 +48,68 @@ from Bio import SeqIO
 
 from bam2tensor import __version__
 from bam2tensor.metadata import compute_fasta_sha256
+
+
+def _format_names(names: list[str], limit: int = 6) -> str:
+    """Format a list of sequence names for an error message.
+
+    Args:
+        names: Sequence (chromosome) names to display.
+        limit: Maximum number of names to list before summarising.
+
+    Returns:
+        A comma-separated string; lists longer than ``limit`` are truncated
+        and suffixed with the total count.
+
+    Example:
+        >>> _format_names(["chr1", "chr2"])
+        'chr1, chr2'
+        >>> _format_names(["1", "2", "3", "4"], limit=2)
+        '1, 2, ... (4 total)'
+    """
+    if len(names) <= limit:
+        return ", ".join(names)
+    return ", ".join(names[:limit]) + f", ... ({len(names)} total)"
+
+
+def _missing_chromosomes_message(
+    missing: list[str], fasta_names: list[str], fasta_source: str
+) -> str:
+    """Build the error message for expected chromosomes absent from a FASTA.
+
+    Args:
+        missing: Expected chromosome names that were not found.
+        fasta_names: All sequence names present in the FASTA, in file order.
+        fasta_source: Path to the FASTA file (for display).
+
+    Returns:
+        A message naming the missing chromosomes and the sequences that are
+        available, with a hint when the cause is a ``chr`` prefix mismatch.
+    """
+    available = set(fasta_names)
+    message = (
+        f"Expected chromosome(s) not found in reference FASTA {fasta_source}: "
+        f"{_format_names(missing)}. The FASTA contains {len(fasta_names)} "
+        f"sequence(s): {_format_names(fasta_names)}."
+    )
+    if any(name.startswith("chr") and name[3:] in available for name in missing):
+        message += (
+            " The FASTA appears to use Ensembl-style names (no 'chr' prefix); "
+            "set the expected chromosomes to match "
+            "(e.g. --expected-chromosomes '1,2,3,...')."
+        )
+    elif any(f"chr{name}" in available for name in missing):
+        message += (
+            " The FASTA appears to use UCSC-style names ('chr' prefix); "
+            "set the expected chromosomes to match "
+            "(e.g. --expected-chromosomes 'chr1,chr2,chr3,...')."
+        )
+    else:
+        message += (
+            " Check that the expected chromosomes match the sequence names "
+            "in the FASTA (--expected-chromosomes)."
+        )
+    return message
 
 
 class GenomeMethylationEmbedding:
@@ -128,6 +191,12 @@ class GenomeMethylationEmbedding:
         Raises:
             ValueError: If expected_chromosomes is empty.
 
+        Note:
+            A ``ValueError`` also propagates from the cache loader when an
+            existing cache was built for a different chromosome list or
+            window size, and from the FASTA parser when an expected
+            chromosome is absent from the reference.
+
         Example:
             >>> # xdoctest: +SKIP
             >>> # First run: parses FASTA and creates cache
@@ -169,16 +238,11 @@ class GenomeMethylationEmbedding:
         if not skip_cache:
             try:
                 cache_available = self.load_embedding_cache()
-                assert (
-                    expected_chromosomes == self.expected_chromosomes
-                ), "Expected chromosomes do not match cached chromosomes!"
-                assert (
-                    window_size == self.window_size
-                ), "Window size does not match cached window size!"
             except FileNotFoundError as e:
-                # Stale-cache rejections (version or FASTA SHA-256 mismatch)
-                # raise FileNotFoundError too — always surface those so users
-                # are not silently regenerating a cache they thought was valid.
+                # Stale-cache rejections (version or FASTA SHA-256 mismatch,
+                # unreadable or incomplete cache file) raise FileNotFoundError
+                # too — always surface those so users are not silently
+                # regenerating a cache they thought was valid.
                 if os.path.exists(self.cache_file):
                     print(f"Discarding stale embedding cache: {e}")
                 elif self.verbose:
@@ -247,7 +311,10 @@ class GenomeMethylationEmbedding:
 
         Note:
             Cache files use compression level 3 for a balance between
-            file size and write speed.
+            file size and write speed. The cache is written to a temporary
+            file and renamed into place, so an interrupted run (or several
+            jobs starting at once in the same directory) can never leave a
+            truncated cache behind.
         """
 
         assert len(self.cpg_sites_dict) > 0, "CpG sites dict is empty!"
@@ -266,8 +333,17 @@ class GenomeMethylationEmbedding:
 
         if self.verbose:
             print(f"\tSaving embedding to cache: {self.cache_file}")
-        with gzip.open(self.cache_file, "wt", compresslevel=3, encoding="utf-8") as f:
-            json.dump(cache_data, f)
+        # Write-then-rename: os.replace() is atomic, so readers only ever see
+        # a complete cache. The PID keeps concurrent writers (e.g. array jobs
+        # sharing a working directory) from clobbering each other's temp file.
+        tmp_file = f"{self.cache_file}.{os.getpid()}.tmp"
+        try:
+            with gzip.open(tmp_file, "wt", compresslevel=3, encoding="utf-8") as f:
+                json.dump(cache_data, f)
+            os.replace(tmp_file, self.cache_file)
+        finally:
+            if os.path.exists(tmp_file):
+                os.remove(tmp_file)
         if self.verbose:
             print("\tSaved embedding cache.")
 
@@ -279,25 +355,33 @@ class GenomeMethylationEmbedding:
         FASTA parsing step.
 
         Provenance is validated before the cached data is trusted: the
-        cache must have been written by the same major.minor of
-        bam2tensor and must reference a FASTA file with the same SHA-256
-        as the current ``fasta_source``. A stale cache is rejected with
-        a ``FileNotFoundError`` so the caller falls through to a fresh
-        FASTA parse and overwrites the stale cache on save.
+        cache must be readable, must have been written by the same
+        version of bam2tensor, must reference a FASTA file with the same
+        SHA-256 as the current ``fasta_source``, and must contain every
+        expected chromosome. A cache that fails any of these checks is
+        rejected with a ``FileNotFoundError`` so the caller falls through
+        to a fresh FASTA parse and overwrites the stale cache on save.
+
+        A cache that is valid but was built for a *different
+        configuration* (chromosome list or window size) is not silently
+        replaced: the same genome name is being used for two different
+        column layouts, so a ``ValueError`` asks the user to disambiguate.
 
         Returns:
             True if the cache was successfully loaded.
 
         Raises:
             FileNotFoundError: If the cache file does not exist, or if
-                the cache is stale (version mismatch or FASTA SHA-256
-                mismatch).
+                the cache is stale or unusable (unreadable/truncated
+                file, version mismatch, FASTA SHA-256 mismatch, or
+                missing chromosomes).
+            ValueError: If the cache was built for a different list of
+                expected chromosomes or a different window size.
 
         Note:
-            After loading, the caller should verify that
-            ``expected_chromosomes`` and ``window_size`` match the current
-            configuration, as this method overwrites those attributes
-            with cached values.
+            Only ``cpg_sites_dict`` is populated from the cache. The
+            instance's own configuration (``genome_name``,
+            ``fasta_source``, ``expected_chromosomes``) is left untouched.
         """
 
         if not os.path.exists(self.cache_file):
@@ -306,13 +390,27 @@ class GenomeMethylationEmbedding:
         if self.verbose:
             print(f"\tReading embedding from cache: {self.cache_file}")
 
-        with gzip.open(self.cache_file, "rt") as f:
-            self.cache_data = json.load(f)
+        # A truncated or corrupt cache (e.g. from a run interrupted while an
+        # older version was writing it) must not be fatal: reject it and let
+        # the caller regenerate.
+        try:
+            with gzip.open(self.cache_file, "rt", encoding="utf-8") as f:
+                cache_data = json.load(f)
+        except (OSError, EOFError, ValueError, zlib.error) as exc:
+            raise FileNotFoundError(
+                f"Unreadable cache {self.cache_file!r} "
+                f"({type(exc).__name__}: {exc}). Regenerating."
+            ) from exc
+        if not isinstance(cache_data, dict):
+            raise FileNotFoundError(
+                f"Unreadable cache {self.cache_file!r} (not a JSON object). "
+                "Regenerating."
+            )
 
         # Validate cache provenance: stale caches predating v2.7 used a
         # case-sensitive CpG search that silently dropped roughly half
         # the CpG sites in soft-masked FASTAs (e.g. UCSC's hg38.fa.gz).
-        cached_version = self.cache_data.get("bam2tensor_version")
+        cached_version = cache_data.get("bam2tensor_version")
         if cached_version != __version__:
             raise FileNotFoundError(
                 f"Stale cache {self.cache_file!r}: written by bam2tensor "
@@ -320,7 +418,7 @@ class GenomeMethylationEmbedding:
                 "Regenerating."
             )
 
-        cached_fasta_sha256 = self.cache_data.get("fasta_sha256")
+        cached_fasta_sha256 = cache_data.get("fasta_sha256")
         current_fasta_sha256 = compute_fasta_sha256(self.fasta_source)
         if cached_fasta_sha256 != current_fasta_sha256:
             raise FileNotFoundError(
@@ -329,15 +427,50 @@ class GenomeMethylationEmbedding:
                 "Regenerating."
             )
 
-        # Load the cached data
-        self.genome_name = self.cache_data["genome_name"]
-        self.fasta_source = self.cache_data["fasta_source"]
-        self.expected_chromosomes = self.cache_data["expected_chromosomes"]
-        self.window_size = self.cache_data["window_size"]
-        self.cpg_sites_dict = self.cache_data["cpg_sites_dict"]
+        cached_chromosomes = cache_data.get("expected_chromosomes")
+        cpg_sites_dict = cache_data.get("cpg_sites_dict")
+        if not isinstance(cached_chromosomes, list) or not isinstance(
+            cpg_sites_dict, dict
+        ):
+            raise FileNotFoundError(
+                f"Unreadable cache {self.cache_file!r} (missing CpG site data). "
+                "Regenerating."
+            )
+
+        # The cache is keyed only by genome name. A different chromosome list
+        # (or window size) under the same name means a different column
+        # layout, so refuse rather than silently overwrite either one.
+        if cached_chromosomes != self.expected_chromosomes:
+            raise ValueError(
+                f"Expected chromosomes do not match the cache {self.cache_file!r}: "
+                f"it was built for [{_format_names(cached_chromosomes)}] but "
+                f"[{_format_names(self.expected_chromosomes)}] were requested. "
+                "Use a different genome name for this chromosome list, skip "
+                "the cache (--skip-cache), or delete the cache file."
+            )
+        cached_window_size = cache_data.get("window_size")
+        if cached_window_size != self.window_size:
+            raise ValueError(
+                f"Window size does not match the cache {self.cache_file!r}: "
+                f"it was built with {cached_window_size} but {self.window_size} "
+                "was requested. Use a different genome name, skip the cache "
+                "(--skip-cache), or delete the cache file."
+            )
+
+        # Releases up to 2.8 could save a cache that lacked an expected
+        # chromosome (the FASTA did not contain it) before crashing. Reject
+        # those so the fresh parse can report the problem properly.
+        missing = [ch for ch in self.expected_chromosomes if ch not in cpg_sites_dict]
+        if missing:
+            raise FileNotFoundError(
+                f"Stale cache {self.cache_file!r}: no CpG sites stored for "
+                f"{_format_names(missing)}. Regenerating."
+            )
+
+        self.cpg_sites_dict = cpg_sites_dict
 
         if self.verbose:
-            print(f"\tCached genome fasta source: {self.fasta_source}")
+            print(f"\tCached genome fasta source: {cache_data.get('fasta_source')}")
 
         return True
 
@@ -368,6 +501,10 @@ class GenomeMethylationEmbedding:
 
         Raises:
             FileNotFoundError: If the FASTA file cannot be read.
+            ValueError: If any expected chromosome is absent from the
+                FASTA. The message lists the missing names and the
+                sequences that are available, and flags ``chr`` prefix
+                mismatches (UCSC vs. Ensembl naming).
 
         Note:
             For the human genome (GRCh38), expect approximately 28 million
@@ -383,37 +520,56 @@ class GenomeMethylationEmbedding:
                 "Cannot read fasta file: " + os.path.abspath(self.fasta_source)
             )
 
-        # Iterate over sequences
-        for seqrecord in tqdm(
-            SeqIO.parse(self.fasta_source, "fasta"),  # type: ignore
-            total=len(self.expected_chromosomes),
-            disable=not self.verbose,
-        ):
-            if seqrecord.id not in self.expected_chromosomes:
-                if self.verbose:
-                    tqdm.write(f"\tSkipping chromosome {seqrecord.id}")
-                continue
-            # Upper-case the sequence so soft-masked FASTAs (UCSC's default
-            # hg38.fa.gz uses lowercase for RepeatMasker/TRF regions) do not
-            # silently drop CpGs in repeats — that is roughly half of all
-            # CpGs in the human genome.
-            sequence = seqrecord.seq.upper()
+        # Every sequence name seen in the FASTA, for the missing-chromosome
+        # diagnostic below.
+        fasta_names: list[str] = []
 
-            # Find all CpG sites
-            # The pos+1 is because we want to store the 1-based position, because .bed is wild and arguably 1-based maybe:
-            # e.g. https://genome-blog.soe.ucsc.edu/blog/2016/12/12/the-ucsc-genome-browser-coordinate-counting-systems/
-            # Regardless, $ samtools faidx GRCh38-DAC-U2AF1.fna chr1:0-0 throws an error, while
-            # $ samtools faidx GRCh38-DAC-U2AF1.fna chr1:1-1 returns the correct base.
+        # Open the FASTA ourselves so the handle is closed deterministically,
+        # including when parsing stops early on an error.
+        with open(self.fasta_source) as fasta_handle:
+            # Iterate over sequences
+            for seqrecord in tqdm(
+                SeqIO.parse(fasta_handle, "fasta"),  # type: ignore
+                total=len(self.expected_chromosomes),
+                disable=not self.verbose,
+            ):
+                fasta_names.append(seqrecord.id)
+                if seqrecord.id not in self.expected_chromosomes:
+                    if self.verbose:
+                        tqdm.write(f"\tSkipping chromosome {seqrecord.id}")
+                    continue
+                # Upper-case the sequence so soft-masked FASTAs (UCSC's default
+                # hg38.fa.gz uses lowercase for RepeatMasker/TRF regions) do not
+                # silently drop CpGs in repeats — that is roughly half of all
+                # CpGs in the human genome.
+                sequence = seqrecord.seq.upper()
 
-            cpg_indices = []
-            search_str = "CG"
-            pos = sequence.find(search_str)
+                # Find all CpG sites
+                # The pos+1 is because we want to store the 1-based position, because .bed is wild and arguably 1-based maybe:
+                # e.g. https://genome-blog.soe.ucsc.edu/blog/2016/12/12/the-ucsc-genome-browser-coordinate-counting-systems/
+                # Regardless, $ samtools faidx GRCh38-DAC-U2AF1.fna chr1:0-0 throws an error, while
+                # $ samtools faidx GRCh38-DAC-U2AF1.fna chr1:1-1 returns the correct base.
 
-            while pos != -1:
-                cpg_indices.append(pos + 1)
-                pos = sequence.find(search_str, pos + 1)
+                cpg_indices = []
+                search_str = "CG"
+                pos = sequence.find(search_str)
 
-            self.cpg_sites_dict[seqrecord.id] = cpg_indices
+                while pos != -1:
+                    cpg_indices.append(pos + 1)
+                    pos = sequence.find(search_str, pos + 1)
+
+                self.cpg_sites_dict[seqrecord.id] = cpg_indices
+
+        # Fail loudly, here, if the FASTA does not provide every expected
+        # chromosome — otherwise the column layout cannot be built and the
+        # failure surfaces later as an opaque KeyError.
+        missing = [
+            ch for ch in self.expected_chromosomes if ch not in self.cpg_sites_dict
+        ]
+        if missing:
+            raise ValueError(
+                _missing_chromosomes_message(missing, fasta_names, self.fasta_source)
+            )
 
         if self.verbose:
             print(f"\tFound {len(self.cpg_sites_dict)} chromosomes in reference fasta.")

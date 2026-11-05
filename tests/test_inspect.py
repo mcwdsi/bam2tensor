@@ -10,6 +10,7 @@ from bam2tensor import __main__, __version__
 from bam2tensor.inspect import _format_size
 from bam2tensor.inspect import main as inspect_main
 from bam2tensor.metadata import write_npz_metadata, write_npz_tlen
+from tests.paths import TEST_BAM, TEST_BAM_INDEX, TEST_FASTA
 
 
 def test_inspect_with_metadata(tmp_path) -> None:
@@ -93,8 +94,8 @@ def test_inspect_many_chromosomes(tmp_path) -> None:
 
 def test_inspect_end_to_end(tmp_path) -> None:
     """Full pipeline: bam2tensor produces file, bam2tensor-inspect reads it."""
-    shutil.copy("tests/test.bam", tmp_path / "test.bam")
-    shutil.copy("tests/test.bam.bai", tmp_path / "test.bam.bai")
+    shutil.copy(TEST_BAM, tmp_path / "test.bam")
+    shutil.copy(TEST_BAM_INDEX, tmp_path / "test.bam.bai")
 
     runner = CliRunner()
     # Run extraction
@@ -104,7 +105,7 @@ def test_inspect_end_to_end(tmp_path) -> None:
             "--input-path",
             str(tmp_path / "test.bam"),
             "--reference-fasta",
-            "tests/test_fasta.fa",
+            TEST_FASTA,
             "--genome-name",
             "test",
             "--expected-chromosomes",

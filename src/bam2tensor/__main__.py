@@ -27,6 +27,7 @@ import math
 import os
 import sys
 import time
+import warnings
 import click
 
 import scipy.sparse
@@ -160,19 +161,22 @@ def validate_input_output(
 
     Checks each BAM file in the list to ensure it can be read, and verifies
     that the corresponding output .methylation.npz file can be written.
-    Prints warnings if output files already exist and --overwrite is specified.
+    Running these checks up front means a permissions problem is reported
+    before any (potentially hours-long) extraction starts, rather than
+    when the first result is saved.
 
     Args:
         bams_to_process: List of paths to BAM files to validate.
-        overwrite: If True, allows overwriting existing output files.
-            If False and an output file exists, it will be skipped during
-            processing (not validated here).
+        overwrite: If True, existing output files will be overwritten, so
+            they must be writable. If False and an output file exists, it
+            will be skipped during processing (and is not validated here).
         output_dir: Optional output directory for .methylation.npz files.
             If None, output files are placed next to the input BAM files.
 
     Raises:
-        ValueError: If any input BAM file is not readable, or if the
-            output directory is not writable.
+        ValueError: If any input BAM file is not readable, if the output
+            directory is not writable, or if ``overwrite`` is set and an
+            existing output file is not writable.
 
     Note:
         Output files are named by replacing the .bam extension with
@@ -185,11 +189,13 @@ def validate_input_output(
 
         output_file = get_output_path(bam_file, output_dir)
         if os.path.exists(output_file):
-            if overwrite and os.access(output_file, os.W_OK):
-                pass  # Silently allow; the per-BAM output will show the overwrite
-        else:
-            if not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
-                raise ValueError(f"Output file path is not writable: {output_file}")
+            # Without --overwrite the BAM is skipped, so nothing is written.
+            if overwrite and not os.access(output_file, os.W_OK):
+                raise ValueError(
+                    f"Output file exists and is not writable: {output_file}"
+                )
+        elif not os.access(os.path.dirname(os.path.abspath(output_file)), os.W_OK):
+            raise ValueError(f"Output file path is not writable: {output_file}")
 
 
 @click.command(
@@ -383,10 +389,19 @@ def main(
         UsageError: If neither ``--reference-fasta`` nor
             ``--download-reference`` is specified, or if ``--genome-name``
             is missing when not using ``--download-reference``.
+        ClickException: If the CpG site index cannot be built for the
+            requested configuration (for example, an expected chromosome
+            is absent from the reference FASTA, or the cache on disk was
+            built for a different chromosome list).
 
     Note:
         This function is decorated with Click options and is typically
         invoked via the command line rather than called directly.
+
+        A BAM that cannot be processed (missing index, chromosome names
+        that do not match the reference, unreadable file) is reported and
+        skipped so the remaining BAMs still run. If any BAM failed, the
+        process exits with status 1 after printing the summary.
     """
     # Handle --list-genomes: print available genomes and exit
     if list_genomes:
@@ -469,13 +484,19 @@ def main(
 
     # ── Load CpG index ──────────────────────────────────────────────────
     print(f"Loading CpG site index for {genome_name}...")
-    genome_methylation_embedding = GenomeMethylationEmbedding(
-        genome_name=genome_name,
-        expected_chromosomes=chrom_list,
-        fasta_source=reference_fasta,
-        skip_cache=skip_cache,
-        verbose=verbose,
-    )
+    try:
+        genome_methylation_embedding = GenomeMethylationEmbedding(
+            genome_name=genome_name,
+            expected_chromosomes=chrom_list,
+            fasta_source=reference_fasta,
+            skip_cache=skip_cache,
+            verbose=verbose,
+        )
+    except ValueError as e:
+        # Configuration problems (chromosome names absent from the FASTA, a
+        # cache built for a different chromosome list): report the message,
+        # not a traceback.
+        raise click.ClickException(str(e)) from e
     n_chroms = len(genome_methylation_embedding.cpg_sites_dict)
     cpg_crc32 = compute_cpg_index_crc32(genome_methylation_embedding)
     print(
@@ -523,22 +544,33 @@ def main(
         # Extract
         print("  Extracting methylation data...")
         try:
-            extraction_result = extract_methylation_data_from_bam(
-                input_bam=input_bam,
-                genome_methylation_embedding=genome_methylation_embedding,
-                quality_limit=quality_limit,
-                filter_non_converted=filter_non_converted,
-                non_converted_threshold=non_converted_threshold,
-                filter_em_overconversion=filter_em_overconversion,
-                em_overconversion_min_cpgs=em_overconversion_min_cpgs,
-                threads=threads,
-                verbose=verbose,
-                debug=debug,
-            )
-        except FileNotFoundError as e:
+            # Record warnings raised during extraction (e.g. the non-converted
+            # filter could not evaluate reads lacking an MD tag) so they are
+            # shown with this BAM's report rather than as a raw Python warning.
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always", RuntimeWarning)
+                extraction_result = extract_methylation_data_from_bam(
+                    input_bam=input_bam,
+                    genome_methylation_embedding=genome_methylation_embedding,
+                    quality_limit=quality_limit,
+                    filter_non_converted=filter_non_converted,
+                    non_converted_threshold=non_converted_threshold,
+                    filter_em_overconversion=filter_em_overconversion,
+                    em_overconversion_min_cpgs=em_overconversion_min_cpgs,
+                    threads=threads,
+                    verbose=verbose,
+                    debug=debug,
+                )
+        except (OSError, ValueError) as e:
+            # Problems with this particular BAM (missing index, chromosome
+            # names that do not match the reference, unreadable/truncated
+            # file). Report it and carry on, so one bad file does not abort a
+            # whole directory run; the exit status reflects the failure.
             print(f"  ERROR: {e}")
             errors_list.append(e)
             continue
+        for caught in caught_warnings:
+            print(f"  WARNING: {caught.message}")
 
         # Matrix stats
         n_reads = extraction_result.matrix.shape[0]
@@ -590,6 +622,11 @@ def main(
             print(f"                 - {error}")
     print(f"  Total time:    {_format_elapsed(time.time() - time_start)}")
     print("=" * 72)
+
+    # A run in which any BAM failed must not look like a success to a
+    # scheduler or pipeline.
+    if errors_list:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

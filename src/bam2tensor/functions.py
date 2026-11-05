@@ -55,6 +55,7 @@ import numpy as np
 import scipy.sparse
 import pysam
 import bisect
+import warnings
 
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
@@ -78,8 +79,12 @@ class ExtractionResult(NamedTuple):
 
 
 # BAM flag bits for reads to skip: duplicate (0x400), qcfail (0x200),
-# secondary (0x100), supplementary (0x800).
-_SKIP_FLAGS = 0x400 | 0x200 | 0x100 | 0x800
+# secondary (0x100), supplementary (0x800), unmapped (0x4).
+#
+# Unmapped reads matter because an unmapped mate of a mapped read is "placed"
+# at its mate's coordinates, so a region fetch returns it even though it has
+# no alignment (no CIGAR, no reference end).
+_SKIP_FLAGS = 0x400 | 0x200 | 0x100 | 0x800 | 0x4
 
 
 def count_non_cpg_retained_xm(xm_tag: str) -> int:
@@ -352,6 +357,9 @@ class _ChromExtractionResult(NamedTuple):
         tlens: Per-read signed template lengths (one entry per row).
         missing: ``True`` if the chromosome was not present in the BAM
             file (the caller logs a verbose note in that case).
+        reads_without_md: Number of reads the non-converted filter could
+            not evaluate because they carry no ``MD`` tag. Always ``0``
+            when that filter is off or the reads are Bismark-style.
     """
 
     rows: list[int]
@@ -359,6 +367,7 @@ class _ChromExtractionResult(NamedTuple):
     data: list[int]
     tlens: list[int]
     missing: bool
+    reads_without_md: int = 0
 
 
 class _ExtractionConfig(NamedTuple):
@@ -473,14 +482,22 @@ def _extract_chromosome(
         debug_read_name_to_row_number: dict = {}
 
     read_number = 0
+    reads_without_md = 0
 
     for aligned_segment in iter_reads:
         if aligned_segment.mapping_quality < quality_limit:
             continue
 
-        # Single bitwise check replaces 4 separate flag checks:
-        # duplicate (0x400), qcfail (0x200), secondary (0x100), supplementary (0x800)
+        # Single bitwise check replaces separate flag checks: duplicate
+        # (0x400), qcfail (0x200), secondary (0x100), supplementary (0x800),
+        # unmapped (0x4).
         if aligned_segment.flag & _SKIP_FLAGS:
+            continue
+
+        # A read flagged as mapped but carrying no alignment (e.g. CIGAR
+        # "*") has no reference span, so there is nothing to extract.
+        reference_end = aligned_segment.reference_end
+        if reference_end is None:
             continue
 
         # Per-read buffers. We only flush these into the global
@@ -509,10 +526,7 @@ def _extract_chromosome(
             start_idx = bisect.bisect_left(
                 cpg_sites, aligned_segment.reference_start + 1
             )
-            end_idx = bisect.bisect_right(
-                cpg_sites,
-                aligned_segment.reference_end,  # type: ignore[type-var]
-            )
+            end_idx = bisect.bisect_right(cpg_sites, reference_end)
             if start_idx >= end_idx:
                 continue
 
@@ -615,7 +629,13 @@ def _extract_chromosome(
         # against the reference via the MD tag. Applied after the
         # strand check so we don't waste work on daughter-strand reads.
         if filter_non_converted:
-            if (
+            if not aligned_segment.has_tag("MD"):
+                # Without an MD tag the read cannot be compared against the
+                # reference, so the filter cannot evaluate it. Keep the read
+                # but count it, so the caller can warn instead of the filter
+                # silently doing nothing.
+                reads_without_md += 1
+            elif (
                 count_non_cpg_retained_reference(
                     aligned_segment,
                     bool(bisulfite_parent_strand_is_reverse),
@@ -633,10 +653,7 @@ def _extract_chromosome(
 
         # We want CpGs where: read_start < cpg_pos <= read_end (in 1-based terms: read_start+1 <= cpg <= read_end)
         start_idx = bisect.bisect_left(cpg_sites, aligned_segment.reference_start + 1)
-        end_idx = bisect.bisect_right(
-            cpg_sites,
-            aligned_segment.reference_end,  # type: ignore[type-var]
-        )
+        end_idx = bisect.bisect_right(cpg_sites, reference_end)
 
         # If no CpGs in this read, skip
         if start_idx >= end_idx:
@@ -761,6 +778,7 @@ def _extract_chromosome(
         data=coo_data,
         tlens=tlen_list,
         missing=False,
+        reads_without_md=reads_without_md,
     )
 
 
@@ -788,6 +806,8 @@ def extract_methylation_data_from_bam(
         - Duplicate reads are excluded
         - QC-failed reads are excluded
         - Secondary and supplementary alignments are excluded
+        - Unmapped reads are excluded (including unmapped mates placed at
+          their mapped mate's position)
         - For Biscuit/bwameth/gem3: only parent-strand reads are processed
         - For Bismark: all reads are processed (XM tag has pre-resolved calls)
 
@@ -795,7 +815,10 @@ def extract_methylation_data_from_bam(
         - Non-converted reads (``filter_non_converted``): drops reads with
           too many retained non-CpG cytosines, the hallmark of incomplete
           bisulfite/EM-seq conversion. Ports the logic of
-          ``nebiolabs/mark-nonconverted-reads``.
+          ``nebiolabs/mark-nonconverted-reads``. For Biscuit/bwameth/gem3
+          reads this needs the ``MD`` tag; reads without one cannot be
+          evaluated, are kept, and trigger a ``RuntimeWarning`` reporting
+          how many were affected.
         - EM-seq fragment-level over-conversion
           (``filter_em_overconversion``): drops reads whose covered CpGs
           are all called unmethylated, a heuristic for the EM-seq
@@ -985,6 +1008,7 @@ def extract_methylation_data_from_bam(
     coo_data: list[int] = []
     tlen_list: list[int] = []
     row_offset = 0
+    reads_without_md = 0
 
     for chrom, chrom_result in tqdm(
         _iter_chrom_results(), total=len(chrom_items), disable=not verbose
@@ -993,6 +1017,7 @@ def extract_methylation_data_from_bam(
             if verbose:
                 tqdm.write(f"Chromosome {chrom} not found in BAM file, skipping.")
             continue
+        reads_without_md += chrom_result.reads_without_md
         if not chrom_result.rows:
             continue
         coo_row.extend(r + row_offset for r in chrom_result.rows)
@@ -1000,6 +1025,16 @@ def extract_methylation_data_from_bam(
         coo_data.extend(chrom_result.data)
         tlen_list.extend(chrom_result.tlens)
         row_offset += len(chrom_result.tlens)
+
+    if reads_without_md:
+        warnings.warn(
+            f"{reads_without_md:,} read(s) in {input_bam} have no MD tag, so the "
+            "non-converted filter could not evaluate them and they were kept. "
+            "Add MD tags (e.g. with `samtools calmd`) to apply the filter to "
+            "these reads.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     if debug:
         print("Debug info for coo_matrix dimensions:")
