@@ -20,7 +20,6 @@ TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
     "test_genome",
     expected_chromosomes=["chr1", "chr2", "chr3"],
     fasta_source=TEST_FASTA,
-    window_size=150,
     skip_cache=True,  # built at import time: must not write a cache file
     verbose=False,
 )
@@ -49,13 +48,61 @@ def test_cpg_index_crc32_differs_for_different_embeddings(tmp_path) -> None:
         "test_subset",
         expected_chromosomes=["chr1"],
         fasta_source=TEST_FASTA,
-        window_size=150,
         skip_cache=True,
         verbose=False,
     )
     assert compute_cpg_index_crc32(TEST_EMBEDDING) != compute_cpg_index_crc32(
         emb_subset
     )
+
+
+def test_cpg_index_crc32_value_is_stable() -> None:
+    """The checksum of the bundled FASTA's CpG index is pinned.
+
+    The checksum is written into every output file and compared across
+    files, so its definition must never change between releases. This value
+    was produced by bam2tensor 2.8.
+    """
+    assert compute_cpg_index_crc32(TEST_EMBEDDING) == "30241ef1"
+
+
+def test_cpg_index_crc32_matches_its_definition(tmp_path) -> None:
+    """The incremental computation equals CRC32 of the whole text at once."""
+    import zlib
+
+    for chromosomes in (["chr1", "chr2", "chr3"], ["chr3", "chr1"], ["chr2"]):
+        emb = embedding.GenomeMethylationEmbedding(
+            "crc_definition",
+            expected_chromosomes=chromosomes,
+            fasta_source=TEST_FASTA,
+            skip_cache=True,
+            verbose=False,
+        )
+        text = "\n".join(
+            chrom + "\t" + ",".join(str(pos) for pos in emb.cpg_sites_dict[chrom])
+            for chrom in chromosomes
+        )
+        expected = format(zlib.crc32(text.encode("utf-8")) & 0xFFFFFFFF, "08x")
+        assert compute_cpg_index_crc32(emb) == expected
+
+
+def test_cpg_index_crc32_depends_on_chromosome_order() -> None:
+    """Reordering chromosomes reorders columns, so the checksum must differ."""
+    forward = embedding.GenomeMethylationEmbedding(
+        "crc_forward",
+        expected_chromosomes=["chr1", "chr3"],
+        fasta_source=TEST_FASTA,
+        skip_cache=True,
+        verbose=False,
+    )
+    reverse = embedding.GenomeMethylationEmbedding(
+        "crc_reverse",
+        expected_chromosomes=["chr3", "chr1"],
+        fasta_source=TEST_FASTA,
+        skip_cache=True,
+        verbose=False,
+    )
+    assert compute_cpg_index_crc32(forward) != compute_cpg_index_crc32(reverse)
 
 
 # -- write / read round-trip -------------------------------------------------

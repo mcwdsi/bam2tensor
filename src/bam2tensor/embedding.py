@@ -36,9 +36,12 @@ Attributes:
     CACHE_FILE_SUFFIX: The suffix appended to genome_name for cache files.
 """
 
+import bisect
 import gzip
 import json
 import os
+import time
+import warnings
 import zlib
 
 import numpy as np
@@ -48,6 +51,14 @@ from Bio import SeqIO
 
 from bam2tensor import __version__
 from bam2tensor.metadata import compute_fasta_sha256
+
+# How much older than the cache stamp a FASTA's modification time must be
+# before its size + mtime are trusted in place of a content hash. A file
+# rewritten within one timestamp tick of being stamped can keep the same
+# mtime (filesystems resolve mtimes to anywhere between 1 ns and 2 s), so a
+# FASTA modified this recently is always re-hashed. Git applies the same rule
+# to "racily clean" index entries.
+_FASTA_MTIME_SAFETY_MARGIN_NS = 2_000_000_000
 
 
 def _format_names(names: list[str], limit: int = 6) -> str:
@@ -132,9 +143,14 @@ class GenomeMethylationEmbedding:
         fasta_source: Path to the reference FASTA file.
         expected_chromosomes: List of chromosome names to include.
         verbose: Whether to print progress information.
-        cpg_sites_dict: Dictionary mapping chromosome names to lists of
-            CpG positions (1-based coordinates).
+        cpg_sites_dict: Dictionary mapping chromosome names to sorted lists
+            of CpG positions (1-based coordinates).
         total_cpg_sites: Total number of CpG sites across all chromosomes.
+        chromosome_offsets: Dictionary mapping each chromosome name to the
+            matrix column of its first CpG site. The column of the i-th CpG
+            (0-based) on a chromosome is ``chromosome_offsets[chrom] + i``.
+        cpgs_per_chr_cumsum: Cumulative CpG count over
+            ``expected_chromosomes`` (the column just past each chromosome).
         cache_file: Path to the cache file for this genome.
 
     Example:
@@ -157,7 +173,7 @@ class GenomeMethylationEmbedding:
         genome_name: str,
         expected_chromosomes: list[str],
         fasta_source: str,
-        window_size: int = 150,
+        window_size: int | None = None,
         skip_cache: bool = False,
         verbose: bool = False,
     ):
@@ -180,8 +196,9 @@ class GenomeMethylationEmbedding:
                 and the embedding indices follow this ordering.
             fasta_source: Path to the reference genome FASTA file. This should
                 match the genome used for aligning the BAM files.
-            window_size: Reserved for future use. Currently unused but stored
-                in the cache for compatibility checking.
+            window_size: Deprecated and ignored. It never affected the
+                embedding; passing a value emits a ``DeprecationWarning`` and
+                the parameter will be removed in a future release.
             skip_cache: If True, ignore any existing cache file and re-parse
                 the FASTA. Useful when the reference has been modified or the
                 chromosome list has changed.
@@ -193,9 +210,9 @@ class GenomeMethylationEmbedding:
 
         Note:
             A ``ValueError`` also propagates from the cache loader when an
-            existing cache was built for a different chromosome list or
-            window size, and from the FASTA parser when an expected
-            chromosome is absent from the reference.
+            existing cache was built for a different chromosome list, and
+            from the FASTA parser when an expected chromosome is absent
+            from the reference.
 
         Example:
             >>> # xdoctest: +SKIP
@@ -222,7 +239,14 @@ class GenomeMethylationEmbedding:
         self.fasta_source = fasta_source
         self.expected_chromosomes = expected_chromosomes
         self.verbose = verbose
-        self.window_size = window_size
+
+        if window_size is not None:
+            warnings.warn(
+                "The window_size argument of GenomeMethylationEmbedding is "
+                "unused and deprecated; it will be removed in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         # Store the CpG sites in a dict per chromosome
         self.cpg_sites_dict: dict[str, list[int]] = {}
@@ -270,20 +294,20 @@ class GenomeMethylationEmbedding:
         if self.verbose:
             print(f"\tTotal CpG sites: {self.total_cpg_sites:,}")
 
-        # Create a dictionary of chromosome -> CpG site -> index (embedding) for efficient lookup
-        self.chr_to_cpg_to_embedding_dict = {
-            ch: {cpg: idx for idx, cpg in enumerate(self.cpg_sites_dict[ch])}
-            for ch in self.expected_chromosomes
-        }
-
-        # Count the number of CpGs per chromosome
-        cpgs_per_chr: dict[str, int] = {
-            k: len(v) for k, v in self.cpg_sites_dict.items()
-        }
+        # Matrix column of the first CpG on each chromosome. CpG positions are
+        # stored sorted, so the column of a CpG is this offset plus its index
+        # in the chromosome's position list. A binary search therefore
+        # replaces what used to be a second, per-position dict covering every
+        # CpG in the genome (several GB for a human reference).
+        self.chromosome_offsets: dict[str, int] = {}
+        offset = 0
+        for ch in self.expected_chromosomes:
+            self.chromosome_offsets[ch] = offset
+            offset += len(self.cpg_sites_dict[ch])
 
         # Add up the number of CpGs per chromosome, e.g. chr1, then chr1+chr2, then chr1+chr2+chr3, etc
         self.cpgs_per_chr_cumsum: np.ndarray = np.cumsum(
-            [cpgs_per_chr[k] for k in self.expected_chromosomes]
+            [len(self.cpg_sites_dict[k]) for k in self.expected_chromosomes]
         )
 
         if verbose:
@@ -297,10 +321,12 @@ class GenomeMethylationEmbedding:
         - genome_name: The genome identifier
         - fasta_source: Path to the original FASTA file
         - fasta_sha256: SHA-256 of the FASTA file bytes (for cache validation)
+        - fasta_size, fasta_mtime_ns: Size and modification time of the
+          FASTA when the cache was written, and fasta_stat_time_ns, the
+          time they were recorded (a fast path for cache validation)
         - bam2tensor_version: Version that produced this cache
         - total_cpg_sites: Total CpG count across all included chromosomes
         - expected_chromosomes: List of included chromosomes
-        - window_size: The window_size parameter (for compatibility checking)
         - cpg_sites_dict: Dictionary of chromosome -> list of CpG positions
 
         The cache can be loaded by future GenomeMethylationEmbedding instances
@@ -320,14 +346,20 @@ class GenomeMethylationEmbedding:
         assert len(self.cpg_sites_dict) > 0, "CpG sites dict is empty!"
 
         total_cpg_sites = sum(len(v) for v in self.cpg_sites_dict.values())
+        # Stat before hashing: if the file changes in between, the stamp will
+        # not match on the next load and the content hash decides.
+        fasta_stat_time_ns = time.time_ns()
+        fasta_stat = os.stat(self.fasta_source)
         cache_data = {
             "genome_name": self.genome_name,
             "fasta_source": self.fasta_source,
             "fasta_sha256": compute_fasta_sha256(self.fasta_source),
+            "fasta_size": fasta_stat.st_size,
+            "fasta_mtime_ns": fasta_stat.st_mtime_ns,
+            "fasta_stat_time_ns": fasta_stat_time_ns,
             "bam2tensor_version": __version__,
             "total_cpg_sites": total_cpg_sites,
             "expected_chromosomes": self.expected_chromosomes,
-            "window_size": self.window_size,
             "cpg_sites_dict": self.cpg_sites_dict,
         }
 
@@ -356,16 +388,26 @@ class GenomeMethylationEmbedding:
 
         Provenance is validated before the cached data is trusted: the
         cache must be readable, must have been written by the same
-        version of bam2tensor, must reference a FASTA file with the same
-        SHA-256 as the current ``fasta_source``, and must contain every
-        expected chromosome. A cache that fails any of these checks is
-        rejected with a ``FileNotFoundError`` so the caller falls through
-        to a fresh FASTA parse and overwrites the stale cache on save.
+        version of bam2tensor, must have been built from the current
+        ``fasta_source``, and must contain every expected chromosome. A
+        cache that fails any of these checks is rejected with a
+        ``FileNotFoundError`` so the caller falls through to a fresh
+        FASTA parse and overwrites the stale cache on save.
 
-        A cache that is valid but was built for a *different
-        configuration* (chromosome list or window size) is not silently
-        replaced: the same genome name is being used for two different
-        column layouts, so a ``ValueError`` asks the user to disambiguate.
+        The FASTA is identified by its SHA-256. Hashing a multi-gigabyte
+        reference on every run is slow, so the cache also records the
+        FASTA's size and modification time: when both still match — and
+        the FASTA had not been modified within a couple of seconds of
+        the cache being written, when a rewrite could go unnoticed — the
+        file is taken to be unchanged and is not re-read. Otherwise (the
+        file was replaced, was copied without preserving its timestamp,
+        or the cache predates this stamp) the SHA-256 is recomputed and
+        compared.
+
+        A cache that is valid but was built for a *different chromosome
+        list* is not silently replaced: the same genome name is being
+        used for two different column layouts, so a ``ValueError`` asks
+        the user to disambiguate.
 
         Returns:
             True if the cache was successfully loaded.
@@ -376,7 +418,7 @@ class GenomeMethylationEmbedding:
                 file, version mismatch, FASTA SHA-256 mismatch, or
                 missing chromosomes).
             ValueError: If the cache was built for a different list of
-                expected chromosomes or a different window size.
+                expected chromosomes.
 
         Note:
             Only ``cpg_sites_dict`` is populated from the cache. The
@@ -418,14 +460,31 @@ class GenomeMethylationEmbedding:
                 "Regenerating."
             )
 
-        cached_fasta_sha256 = cache_data.get("fasta_sha256")
-        current_fasta_sha256 = compute_fasta_sha256(self.fasta_source)
-        if cached_fasta_sha256 != current_fasta_sha256:
-            raise FileNotFoundError(
-                f"Stale cache {self.cache_file!r}: FASTA SHA-256 mismatch "
-                f"(cache={cached_fasta_sha256}, current={current_fasta_sha256}). "
-                "Regenerating."
-            )
+        # Was the cache built from this FASTA? Cheap check first: same size
+        # and modification time as when the cache was stamped (what make and
+        # rsync rely on), provided the FASTA was not modified so close to the
+        # stamp that a later rewrite could share its timestamp.
+        fasta_stat = os.stat(self.fasta_source)
+        stamp_time_ns = cache_data.get("fasta_stat_time_ns")
+        fasta_unchanged = (
+            cache_data.get("fasta_size") == fasta_stat.st_size
+            and cache_data.get("fasta_mtime_ns") == fasta_stat.st_mtime_ns
+            and isinstance(stamp_time_ns, int)
+            and fasta_stat.st_mtime_ns <= stamp_time_ns - _FASTA_MTIME_SAFETY_MARGIN_NS
+        )
+        if fasta_unchanged:
+            if self.verbose:
+                print("\tFASTA size and modification time match the cache.")
+        else:
+            # Otherwise the contents decide.
+            cached_fasta_sha256 = cache_data.get("fasta_sha256")
+            current_fasta_sha256 = compute_fasta_sha256(self.fasta_source)
+            if cached_fasta_sha256 != current_fasta_sha256:
+                raise FileNotFoundError(
+                    f"Stale cache {self.cache_file!r}: FASTA SHA-256 mismatch "
+                    f"(cache={cached_fasta_sha256}, current={current_fasta_sha256}). "
+                    "Regenerating."
+                )
 
         cached_chromosomes = cache_data.get("expected_chromosomes")
         cpg_sites_dict = cache_data.get("cpg_sites_dict")
@@ -438,8 +497,8 @@ class GenomeMethylationEmbedding:
             )
 
         # The cache is keyed only by genome name. A different chromosome list
-        # (or window size) under the same name means a different column
-        # layout, so refuse rather than silently overwrite either one.
+        # under the same name means a different column layout, so refuse
+        # rather than silently overwrite either one.
         if cached_chromosomes != self.expected_chromosomes:
             raise ValueError(
                 f"Expected chromosomes do not match the cache {self.cache_file!r}: "
@@ -448,15 +507,6 @@ class GenomeMethylationEmbedding:
                 "Use a different genome name for this chromosome list, skip "
                 "the cache (--skip-cache), or delete the cache file."
             )
-        cached_window_size = cache_data.get("window_size")
-        if cached_window_size != self.window_size:
-            raise ValueError(
-                f"Window size does not match the cache {self.cache_file!r}: "
-                f"it was built with {cached_window_size} but {self.window_size} "
-                "was requested. Use a different genome name, skip the cache "
-                "(--skip-cache), or delete the cache file."
-            )
-
         # Releases up to 2.8 could save a cache that lacked an expected
         # chromosome (the FASTA did not contain it) before crashing. Reject
         # those so the fresh parse can report the problem properly.
@@ -641,23 +691,22 @@ class GenomeMethylationEmbedding:
         Returns:
             The matrix column index (0-based) corresponding to this CpG site.
 
+        Raises:
+            KeyError: If ``pos`` is not a CpG site on ``chrom``. (An unknown
+                chromosome name also results in a ``KeyError``.)
+
         Example:
             >>> # xdoctest: +SKIP
             >>> embedding = GenomeMethylationEmbedding(...)
             >>> col_idx = embedding.genomic_position_to_embedding("chr1", 10525)
             >>> print(f"chr1:10525 is at column {col_idx}")
             chr1:10525 is at column 0
-
-        Note:
-            This method assumes the position is a known CpG site. Calling with
-            a position that is not a CpG site will raise a KeyError.
         """
-        # Find the index of the chromosome
-        chr_index = self.chromosomes_dict[chrom]
-        # Find the index of the CpG site in the chromosome
-        cpg_index = self.chr_to_cpg_to_embedding_dict[chrom][pos]
-        # If this is the first chromosome, the embedding position is just the CpG index
-        if chr_index == 0:
-            return int(cpg_index)
-        # Otherwise, add the length of the previous chromosomes to the CpG index
-        return int(cpg_index + self.cpgs_per_chr_cumsum[chr_index - 1])
+        # Column of the chromosome's first CpG (KeyError for unknown names)
+        offset = self.chromosome_offsets[chrom]
+        # CpG positions are sorted: binary-search for this one's index
+        cpg_sites = self.cpg_sites_dict[chrom]
+        cpg_index = bisect.bisect_left(cpg_sites, pos)
+        if cpg_index == len(cpg_sites) or cpg_sites[cpg_index] != pos:
+            raise KeyError(pos)
+        return offset + cpg_index

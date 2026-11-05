@@ -72,6 +72,12 @@ def compute_cpg_index_crc32(embedding: "GenomeMethylationEmbedding") -> str:
     positions are CpG sites within each chromosome.  Two embeddings with
     the same checksum will produce identical column semantics.
 
+    The checksum is defined over the text ``chrom\tpos1,pos2,...``, one
+    line per chromosome in ``expected_chromosomes`` order, joined by
+    newlines. It is computed incrementally, one chromosome at a time, so
+    the whole-genome text (hundreds of megabytes for a human reference)
+    is never held in memory at once.
+
     Args:
         embedding: A fully initialised GenomeMethylationEmbedding whose
             ``cpg_sites_dict`` is populated.
@@ -90,14 +96,18 @@ def compute_cpg_index_crc32(embedding: "GenomeMethylationEmbedding") -> str:
         >>> compute_cpg_index_crc32(emb)
         'a1b2c3d4'
     """
-    # Build a deterministic byte representation:
-    #   chrom\tpos1,pos2,...\n  (one line per chromosome, in order)
-    parts: list[str] = []
-    for chrom in embedding.expected_chromosomes:
+    # Deterministic byte representation:
+    #   chrom\tpos1,pos2,...  (one line per chromosome, in order, joined by \n)
+    # zlib.crc32 accepts a running value, so feeding it line by line gives
+    # exactly the checksum of the concatenated text.
+    crc = 0
+    for index, chrom in enumerate(embedding.expected_chromosomes):
         positions = embedding.cpg_sites_dict.get(chrom, [])
-        parts.append(chrom + "\t" + ",".join(str(p) for p in positions))
-    payload = "\n".join(parts).encode("utf-8")
-    return format(zlib.crc32(payload) & 0xFFFFFFFF, "08x")
+        line = chrom + "\t" + ",".join(map(str, positions))
+        if index:
+            crc = zlib.crc32(b"\n", crc)
+        crc = zlib.crc32(line.encode("utf-8"), crc)
+    return format(crc & 0xFFFFFFFF, "08x")
 
 
 def write_npz_metadata(

@@ -11,7 +11,6 @@ TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
     "test_genome",
     expected_chromosomes=["chr1", "chr2", "chr3"],
     fasta_source=TEST_FASTA,
-    window_size=150,
     skip_cache=True,  # built at import time: must not write a cache file
     verbose=True,
 )

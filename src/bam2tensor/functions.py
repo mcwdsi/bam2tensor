@@ -50,6 +50,7 @@ Example:
 
 from typing import Iterator, NamedTuple
 
+import array
 import multiprocessing as mp
 import numpy as np
 import scipy.sparse
@@ -344,17 +345,25 @@ def check_chromosome_overlap(
 class _ChromExtractionResult(NamedTuple):
     """Per-chromosome extraction output used by :func:`_extract_chromosome`.
 
-    Row indices are *local* (starting at 0). The caller applies the
-    cumulative offset across chromosomes so global row numbering matches
-    the order chromosomes appear in
-    ``GenomeMethylationEmbedding.cpg_sites_dict``.
+    Observations are held in compact typed arrays rather than Python lists
+    of ints: a whole-genome BAM yields on the order of a billion CpG
+    observations, and a list of ints costs roughly nine times the memory
+    of a 32-bit array (an 8-byte pointer plus a 28-byte int object per
+    element), and far more time to pickle back from a worker process.
+
+    Row indices are not stored. Reads are emitted in order, so the row of
+    every observation follows from ``cpgs_per_read``; the caller rebuilds
+    the row array once, after concatenating chromosomes in the order they
+    appear in ``GenomeMethylationEmbedding.cpg_sites_dict``.
 
     Attributes:
-        rows: Local row indices (one entry per CpG observation).
-        cols: Global embedding column indices (already offset by the
-            chromosome's position in the embedding).
-        data: Methylation state values (1 / 0 / -1).
-        tlens: Per-read signed template lengths (one entry per row).
+        cols: Global embedding column index of each CpG observation
+            (already offset by the chromosome's position in the
+            embedding).
+        data: Methylation state of each CpG observation (1 / 0 / -1), int8.
+        cpgs_per_read: Number of CpG observations contributed by each
+            emitted read (one entry per row), int32.
+        tlens: Per-read signed template lengths (one entry per row), int32.
         missing: ``True`` if the chromosome was not present in the BAM
             file (the caller logs a verbose note in that case).
         reads_without_md: Number of reads the non-converted filter could
@@ -362,10 +371,10 @@ class _ChromExtractionResult(NamedTuple):
             when that filter is off or the reads are Bismark-style.
     """
 
-    rows: list[int]
-    cols: list[int]
-    data: list[int]
-    tlens: list[int]
+    cols: np.ndarray
+    data: np.ndarray
+    cpgs_per_read: np.ndarray
+    tlens: np.ndarray
     missing: bool
     reads_without_md: int = 0
 
@@ -377,6 +386,10 @@ class _ExtractionConfig(NamedTuple):
     parallel path) and inline in the sequential path. Keeps the
     per-chromosome helper's signature small and gives type-checked
     access to settings inside the worker.
+
+    ``col_typecode`` is the :mod:`array` typecode used to buffer column
+    indices: ``"i"`` (32-bit) whenever the embedding's column count fits,
+    otherwise ``"q"`` (64-bit).
     """
 
     pysam_threads: int
@@ -386,49 +399,65 @@ class _ExtractionConfig(NamedTuple):
     filter_em_overconversion: bool
     em_overconversion_min_cpgs: int
     debug: bool
+    col_typecode: str = "i"
 
 
-# Worker-process state set by :func:`_worker_init`. ProcessPoolExecutor
-# pickles the embedding to each worker once at startup, so per-chromosome
-# tasks only need to send the chromosome name across the IPC boundary.
-_WORKER_STATE: "tuple[str, GenomeMethylationEmbedding, _ExtractionConfig] | None" = None
+# One unit of parallel work: (chromosome name, its sorted 1-based CpG
+# positions, the matrix column of its first CpG).
+_ChromTask = tuple[str, list[int], int]
+
+# Worker-process state set by :func:`_worker_init`: the BAM path and the
+# extraction settings, sent once per worker. The CpG positions are *not*
+# part of it — each task carries only the positions for its own chromosome,
+# so a worker never holds (or has to unpickle) the whole genome's index.
+_WORKER_STATE: "tuple[str, _ExtractionConfig] | None" = None
 
 
-def _worker_init(
-    input_bam: str,
-    embedding: GenomeMethylationEmbedding,
-    config: _ExtractionConfig,
-) -> None:
+def _worker_init(input_bam: str, config: _ExtractionConfig) -> None:
     """Initialize a parallel worker with shared extraction state."""
     global _WORKER_STATE
-    _WORKER_STATE = (input_bam, embedding, config)
+    _WORKER_STATE = (input_bam, config)
 
 
-def _worker_extract_chromosome(chrom: str) -> _ChromExtractionResult:
+def _worker_extract_chromosome(task: _ChromTask) -> _ChromExtractionResult:
     """Worker entrypoint: extract methylation calls for one chromosome.
 
     Args:
-        chrom: Chromosome name to process.
+        task: The chromosome name, its sorted 1-based CpG positions, and
+            the matrix column of its first CpG.
 
     Returns:
         The per-chromosome extraction result.
     """
     assert _WORKER_STATE is not None
-    input_bam, embedding, config = _WORKER_STATE
+    input_bam, config = _WORKER_STATE
+    chrom, cpg_sites, col_offset = task
     return _extract_chromosome(
         input_bam=input_bam,
         chrom=chrom,
-        cpg_sites=embedding.cpg_sites_dict[chrom],
-        genome_methylation_embedding=embedding,
+        cpg_sites=cpg_sites,
+        col_offset=col_offset,
         config=config,
     )
+
+
+def _as_array(buffer: array.array) -> np.ndarray:
+    """View a typed :mod:`array` buffer as a NumPy array without copying.
+
+    Args:
+        buffer: The buffer to expose.
+
+    Returns:
+        A NumPy array sharing ``buffer``'s memory, with the matching dtype.
+    """
+    return np.frombuffer(buffer, dtype=buffer.typecode)
 
 
 def _extract_chromosome(
     input_bam: str,
     chrom: str,
     cpg_sites: list[int],
-    genome_methylation_embedding: GenomeMethylationEmbedding,
+    col_offset: int,
     config: _ExtractionConfig,
 ) -> _ChromExtractionResult:
     """Extract methylation calls from one chromosome of a BAM file.
@@ -442,8 +471,8 @@ def _extract_chromosome(
         input_bam: Path to the indexed BAM file.
         chrom: Chromosome name to process.
         cpg_sites: Sorted 1-based CpG positions on ``chrom``.
-        genome_methylation_embedding: Embedding used for
-            ``genomic_position_to_embedding`` lookups.
+        col_offset: Matrix column of the first CpG on ``chrom``; the CpG
+            at index ``i`` of ``cpg_sites`` is column ``col_offset + i``.
         config: Filter and decode settings; see :class:`_ExtractionConfig`.
 
     Returns:
@@ -457,10 +486,12 @@ def _extract_chromosome(
     em_overconversion_min_cpgs = config.em_overconversion_min_cpgs
     debug = config.debug
 
-    coo_row: list[int] = []
-    coo_col: list[int] = []
-    coo_data: list[int] = []
-    tlen_list: list[int] = []
+    # Typed buffers (see _ChromExtractionResult): column index and state per
+    # CpG observation, CpG count and TLEN per emitted read.
+    coo_col = array.array(config.col_typecode)
+    coo_data = array.array("b")
+    cpgs_per_read = array.array("i")
+    tlen_list = array.array("i")
 
     bam = pysam.AlignmentFile(  # type: ignore # pylint: disable=no-member
         input_bam, "rb", require_index=True, threads=config.pysam_threads
@@ -471,10 +502,10 @@ def _extract_chromosome(
     except ValueError:
         bam.close()
         return _ChromExtractionResult(
-            rows=coo_row,
-            cols=coo_col,
-            data=coo_data,
-            tlens=tlen_list,
+            cols=_as_array(coo_col),
+            data=_as_array(coo_data),
+            cpgs_per_read=_as_array(cpgs_per_read),
+            tlens=_as_array(tlen_list),
             missing=True,
         )
 
@@ -530,13 +561,18 @@ def _extract_chromosome(
             if start_idx >= end_idx:
                 continue
 
-            cpgs_within_read_set = set(cpg_sites[start_idx:end_idx])
+            # 0-based reference position of each covered CpG's C -> matrix
+            # column. cpg_sites is sorted, so the CpG at index i is column
+            # col_offset + i: the binary search above already located it.
+            cpg_ref_to_col = {
+                cpg_sites[i] - 1: col_offset + i for i in range(start_idx, end_idx)
+            }
 
             # Map read positions to reference positions, filter to CpG sites
             this_segment_cpgs = [
                 e
                 for e in aligned_segment.get_aligned_pairs(matches_only=True)
-                if e[1] + 1 in cpgs_within_read_set
+                if e[1] in cpg_ref_to_col
             ]
             if not this_segment_cpgs:
                 continue
@@ -559,12 +595,7 @@ def _extract_chromosome(
                     # normally, but possible with edge-case alignments)
                     read_cpg_data.append(-1)
 
-                read_cpg_cols.append(
-                    genome_methylation_embedding.genomic_position_to_embedding(
-                        chrom,
-                        ref_pos + 1,
-                    )
-                )
+                read_cpg_cols.append(cpg_ref_to_col[ref_pos])
 
                 if debug:
                     print(f"\t{query_pos} {ref_pos} XM={xm_char}")
@@ -587,9 +618,9 @@ def _extract_chromosome(
                 debug_read_name_to_row_number[read_key] = read_number
                 print("************************************************\n")
 
-            coo_row.extend([read_number] * len(read_cpg_cols))
             coo_col.extend(read_cpg_cols)
             coo_data.extend(read_cpg_data)
+            cpgs_per_read.append(len(read_cpg_cols))
             tlen_list.append(aligned_segment.template_length)
             read_number += 1
 
@@ -659,8 +690,11 @@ def _extract_chromosome(
         if start_idx >= end_idx:
             continue
 
-        cpgs_within_read = cpg_sites[start_idx:end_idx]
-        cpgs_within_read_set = set(cpgs_within_read)
+        # 0-based reference position of each covered CpG's C -> matrix column
+        # (the CpG at index i of the sorted cpg_sites is column col_offset + i).
+        cpg_ref_to_col = {
+            cpg_sites[i] - 1: col_offset + i for i in range(start_idx, end_idx)
+        }
 
         if debug:
             print(f"Query: {aligned_segment.query_name}")
@@ -679,9 +713,7 @@ def _extract_chromosome(
         # get_aligned_pairs returns a list of tuples of (read_pos, ref_pos)
         # We filter this to only include the specific CpG sites from above
         aligned_pairs = aligned_segment.get_aligned_pairs(matches_only=True)
-        this_segment_cpgs = [
-            e for e in aligned_pairs if e[1] + 1 in cpgs_within_read_set
-        ]
+        this_segment_cpgs = [e for e in aligned_pairs if e[1] in cpg_ref_to_col]
 
         # If no CpGs covered (after filtering for matches only), skip
         if not this_segment_cpgs:
@@ -708,12 +740,7 @@ def _extract_chromosome(
             ref_to_query = {}
 
         for query_pos, ref_pos in this_segment_cpgs:
-            read_cpg_cols.append(
-                genome_methylation_embedding.genomic_position_to_embedding(
-                    chrom,
-                    ref_pos + 1,
-                )
-            )
+            read_cpg_cols.append(cpg_ref_to_col[ref_pos])
 
             if bisulfite_parent_strand_is_reverse:
                 target_query_pos = ref_to_query.get(ref_pos + 1)
@@ -762,9 +789,9 @@ def _extract_chromosome(
                 + ("_1" if aligned_segment.is_read1 else "_2")
             ] = read_number
 
-        coo_row.extend([read_number] * len(read_cpg_cols))
         coo_col.extend(read_cpg_cols)
         coo_data.extend(read_cpg_data)
+        cpgs_per_read.append(len(read_cpg_cols))
         tlen_list.append(aligned_segment.template_length)
         read_number += 1
 
@@ -773,10 +800,10 @@ def _extract_chromosome(
 
     bam.close()
     return _ChromExtractionResult(
-        rows=coo_row,
-        cols=coo_col,
-        data=coo_data,
-        tlens=tlen_list,
+        cols=_as_array(coo_col),
+        data=_as_array(coo_data),
+        cpgs_per_read=_as_array(cpgs_per_read),
+        tlens=_as_array(tlen_list),
         missing=False,
         reads_without_md=reads_without_md,
     )
@@ -868,12 +895,16 @@ def extract_methylation_data_from_bam(
             worker. Default 1 (in-process, no IPC overhead). Values
             above 1 fan out per-chromosome extraction across worker
             processes; output is bitwise-identical to ``threads=1``
-            because chromosomes are processed in
-            ``cpg_sites_dict`` order and per-worker row indices are
-            offset by the cumulative read count from preceding
-            chromosomes. Recommended: leave at 1 for small BAMs (worker
+            because per-chromosome results are concatenated in
+            ``cpg_sites_dict`` order, whatever order the workers finish
+            in. Each worker is sent only the CpG positions of the
+            chromosome it is processing, not the whole embedding.
+            Recommended: leave at 1 for small BAMs (worker
             startup dominates); set to the number of physical cores
-            for whole-genome WGBS BAMs.
+            for whole-genome WGBS BAMs. Workers are started with the
+            ``spawn`` method, so a script that passes ``threads > 1``
+            must do so from under ``if __name__ == "__main__":``
+            (standard :mod:`multiprocessing` practice).
         verbose: If True, display a progress bar and print the total read
             count. Useful for monitoring progress on large files.
         debug: If True, enable extensive validation and debug output.
@@ -888,6 +919,7 @@ def extract_methylation_data_from_bam(
           that passed filters and covered at least one CpG site,
           n_cpg_sites is genome_methylation_embedding.total_cpg_sites,
           and values are: 1 (methylated), 0 (unmethylated), -1 (no data).
+          Values are stored as int64.
           The matrix uses COO format for efficient construction; convert
           to CSR (tocsr()) for row slicing or CSC (tocsc()) for column
           slicing.
@@ -963,6 +995,8 @@ def extract_methylation_data_from_bam(
         print(f"\tTotal reads: {input_bam_object.mapped:,}\n")
     input_bam_object.close()
 
+    n_cols = genome_methylation_embedding.total_cpg_sites
+
     config = _ExtractionConfig(
         pysam_threads=4 if threads == 1 else 1,
         quality_limit=quality_limit,
@@ -971,18 +1005,24 @@ def extract_methylation_data_from_bam(
         filter_em_overconversion=filter_em_overconversion,
         em_overconversion_min_cpgs=em_overconversion_min_cpgs,
         debug=debug,
+        col_typecode="i" if n_cols <= np.iinfo(np.int32).max else "q",
     )
 
-    chrom_items = list(genome_methylation_embedding.cpg_sites_dict.items())
+    # One task per chromosome, in cpg_sites_dict order: the row order of the
+    # output follows this order in both the sequential and parallel paths.
+    chrom_tasks: list[_ChromTask] = [
+        (chrom, cpg_sites, genome_methylation_embedding.chromosome_offsets[chrom])
+        for chrom, cpg_sites in genome_methylation_embedding.cpg_sites_dict.items()
+    ]
 
     def _iter_chrom_results() -> Iterator[tuple[str, _ChromExtractionResult]]:
         if threads == 1:
-            for chrom, cpg_sites in chrom_items:
+            for chrom, cpg_sites, col_offset in chrom_tasks:
                 yield chrom, _extract_chromosome(
                     input_bam=input_bam,
                     chrom=chrom,
                     cpg_sites=cpg_sites,
-                    genome_methylation_embedding=genome_methylation_embedding,
+                    col_offset=col_offset,
                     config=config,
                 )
             return
@@ -990,41 +1030,42 @@ def extract_methylation_data_from_bam(
         # because pysam holds C-level locks across the fork). Spawn is
         # also the default on macOS for Python 3.8+, but be explicit.
         ctx = mp.get_context("spawn")
-        chrom_names = [chrom for chrom, _ in chrom_items]
         with ProcessPoolExecutor(
             max_workers=threads,
             mp_context=ctx,
             initializer=_worker_init,
-            initargs=(input_bam, genome_methylation_embedding, config),
+            initargs=(input_bam, config),
         ) as executor:
-            # map() preserves submission order — required so we can apply
-            # cumulative row offsets that match the sequential path.
+            # map() preserves submission order — required so chromosomes are
+            # concatenated in the same order as the sequential path. The
+            # executor pickles tasks a few at a time as workers free up, so
+            # only the chromosomes in flight are ever serialised at once.
             yield from zip(
-                chrom_names, executor.map(_worker_extract_chromosome, chrom_names)
+                (task[0] for task in chrom_tasks),
+                executor.map(_worker_extract_chromosome, chrom_tasks),
             )
 
-    coo_row: list[int] = []
-    coo_col: list[int] = []
-    coo_data: list[int] = []
-    tlen_list: list[int] = []
-    row_offset = 0
+    # Per-chromosome chunks, concatenated once at the end.
+    col_chunks: list[np.ndarray] = []
+    data_chunks: list[np.ndarray] = []
+    cpgs_per_read_chunks: list[np.ndarray] = []
+    tlen_chunks: list[np.ndarray] = []
     reads_without_md = 0
 
     for chrom, chrom_result in tqdm(
-        _iter_chrom_results(), total=len(chrom_items), disable=not verbose
+        _iter_chrom_results(), total=len(chrom_tasks), disable=not verbose
     ):
         if chrom_result.missing:
             if verbose:
                 tqdm.write(f"Chromosome {chrom} not found in BAM file, skipping.")
             continue
         reads_without_md += chrom_result.reads_without_md
-        if not chrom_result.rows:
+        if len(chrom_result.cpgs_per_read) == 0:
             continue
-        coo_row.extend(r + row_offset for r in chrom_result.rows)
-        coo_col.extend(chrom_result.cols)
-        coo_data.extend(chrom_result.data)
-        tlen_list.extend(chrom_result.tlens)
-        row_offset += len(chrom_result.tlens)
+        col_chunks.append(chrom_result.cols)
+        data_chunks.append(chrom_result.data)
+        cpgs_per_read_chunks.append(chrom_result.cpgs_per_read)
+        tlen_chunks.append(chrom_result.tlens)
 
     if reads_without_md:
         warnings.warn(
@@ -1036,24 +1077,46 @@ def extract_methylation_data_from_bam(
             stacklevel=2,
         )
 
+    def _concatenate(chunks: list[np.ndarray], dtype: type) -> np.ndarray:
+        # Concatenate straight into the final dtype, then drop the chunks so
+        # their memory is released before the next array is built.
+        if not chunks:
+            return np.empty(0, dtype=dtype)
+        combined: np.ndarray = np.concatenate(chunks, dtype=dtype)
+        chunks.clear()
+        return combined
+
+    cpgs_per_read = _concatenate(cpgs_per_read_chunks, np.int32)
+    n_reads = len(cpgs_per_read)
+
+    # Build the index arrays directly in the dtype scipy will choose for a
+    # matrix of this shape, so it adopts them instead of converting copies.
+    index_dtype = scipy.sparse.get_index_dtype(maxval=max(n_reads, n_cols))
+    # Reads were emitted in order, so each read's row index simply repeats
+    # once per CpG it covers.
+    coo_row = np.repeat(np.arange(n_reads, dtype=index_dtype), cpgs_per_read)
+    coo_col = _concatenate(col_chunks, index_dtype)
+    # int64 values keep the saved .npz identical to earlier releases, which
+    # built the matrix from Python ints.
+    coo_data = _concatenate(data_chunks, np.int64)
+    tlen_array = _concatenate(tlen_chunks, np.int32)
+
     if debug:
         print("Debug info for coo_matrix dimensions:")
         print(f"\tcoo_row: {len(coo_row):,}")
-        if coo_row:
-            print(f"\tcoo row max: {max(coo_row):,}")
+        if len(coo_row):
+            print(f"\tcoo row max: {int(coo_row.max()):,}")
         print(f"\tcoo_col: {len(coo_col):,}")
-        if coo_col:
-            print(f"\tcoo col max: {max(coo_col):,}")
+        if len(coo_col):
+            print(f"\tcoo col max: {int(coo_col.max()):,}")
         print(f"\tcoo_data: {len(coo_data):,}")
-        print(f"\ttotal_cpg_sites: {genome_methylation_embedding.total_cpg_sites:,}")
+        print(f"\ttotal_cpg_sites: {n_cols:,}")
 
     sparse_matrix = scipy.sparse.coo_matrix(
         (coo_data, (coo_row, coo_col)),
-        shape=(row_offset, genome_methylation_embedding.total_cpg_sites),
+        shape=(n_reads, n_cols),
     )
 
-    assert sparse_matrix.shape[1] == genome_methylation_embedding.total_cpg_sites
-
-    tlen_array = np.array(tlen_list, dtype=np.int32)
+    assert sparse_matrix.shape[1] == n_cols
 
     return ExtractionResult(matrix=sparse_matrix, tlen=tlen_array)
