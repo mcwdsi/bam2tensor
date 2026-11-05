@@ -420,6 +420,11 @@ class _ChromExtractionResult(NamedTuple):
         reads_without_md: Number of reads the non-converted filter could
             not evaluate because they carry no ``MD`` tag. Always ``0``
             when that filter is off or the reads are Bismark-style.
+        strand_checks: Number of CpGs, in reads decoded from their bases,
+            at which the base that the read's strand tag says cannot be
+            converted was examined.
+        strand_contradictions: How many of those showed the other
+            strand's conversion product, contradicting the tag.
     """
 
     cols: np.ndarray
@@ -428,6 +433,8 @@ class _ChromExtractionResult(NamedTuple):
     tlens: np.ndarray
     missing: bool
     reads_without_md: int = 0
+    strand_checks: int = 0
+    strand_contradictions: int = 0
 
 
 class _ExtractionConfig(NamedTuple):
@@ -503,6 +510,26 @@ def _as_array(buffer: array.array) -> np.ndarray:
     """
     return np.frombuffer(buffer, dtype=buffer.typecode)
 
+
+# Strand-tag check (Biscuit / bwameth / gem3 reads, which are decoded from
+# their bases on the strength of the aligner's strand tag).
+#
+# A read reports on one strand, so only one base of each CpG can show a
+# conversion: the C for a top-strand fragment, the G for a bottom-strand one.
+# The CpG's other base is never converted. Seeing that other base converted
+# (an A at the G of a read tagged top strand, a T at the C of a read tagged
+# bottom strand) contradicts the tag. In correctly tagged data that only
+# happens through sequencing errors and CpG SNPs — a fraction of a percent of
+# CpGs. Wrongly tagged reads show it at every unmethylated CpG, which is what
+# happens to most complementary-strand pairs when a non-directional library is
+# aligned by an aligner that assumes a directional one (bwa-meth).
+#
+# A BAM is flagged when more than this fraction of the CpGs checked contradict
+# their read's tag...
+_STRAND_CONTRADICTION_WARNING_RATE = 0.02
+# ...provided at least this many CpGs were checked, so that a handful of
+# errors in a small BAM cannot trigger the warning.
+_STRAND_CHECK_MIN_CPGS = 1000
 
 # How far downstream (in bp) a read's mate may start and still be combined
 # with it into one fragment. Reads are processed in coordinate order and rows
@@ -751,6 +778,8 @@ def _extract_chromosome(
     awaiting_mate: dict[str, _Fragment] = {}
 
     reads_without_md = 0
+    strand_checks = 0
+    strand_contradictions = 0
 
     def emit(fragment: _Fragment) -> None:
         # Write a finished fragment's row, unless a filter removed it.
@@ -911,12 +940,22 @@ def _extract_chromosome(
         if start_idx >= end_idx:
             continue
 
-        # 0-based reference position of each of those informative bases, and
-        # where each falls in the read (absent if deleted from the read).
-        informative_positions = [
-            cpg_sites[i] - 1 + informative_offset for i in range(start_idx, end_idx)
-        ]
+        # 0-based reference positions of the two bases of each of those CpGs.
+        # cpg_sites holds the 1-based position of each C, which is also the
+        # 0-based position of its G.
+        g_positions = cpg_sites[start_idx:end_idx]
+        c_positions = [position - 1 for position in g_positions]
+        if bottom_strand:
+            informative_positions, partner_positions = g_positions, c_positions
+        else:
+            informative_positions, partner_positions = c_positions, g_positions
+
+        # Where each informative base falls in the read (absent if deleted
+        # from the read). Reads decoded from their bases also get the
+        # strand-tag check, which looks at each CpG's other base as well.
         wanted = set(informative_positions)
+        if xm_tag is None:
+            wanted.update(partner_positions)
         query_position = {
             ref_pos: query_pos
             for query_pos, ref_pos in aligned_segment.get_aligned_pairs(
@@ -949,9 +988,16 @@ def _extract_chromosome(
                 continue
             if bottom_strand:
                 methylated_base, unmethylated_base = "G", "A"
+                # The C of the CpG belongs to the top strand: a T there is a
+                # top-strand conversion, which a bottom-strand read cannot show.
+                contradicting_base = "T"
             else:
                 methylated_base, unmethylated_base = "C", "T"
-            for ref_pos in informative_positions:
+                # Likewise an A at the G is a bottom-strand conversion.
+                contradicting_base = "A"
+            for ref_pos, partner_ref_pos in zip(
+                informative_positions, partner_positions
+            ):
                 query_pos = query_position.get(ref_pos)
                 if query_pos is None:
                     read_data.append(-1)  # deleted from the read
@@ -962,6 +1008,14 @@ def _extract_chromosome(
                         if base == methylated_base
                         else 0 if base == unmethylated_base else -1
                     )
+
+                # Strand-tag check on the CpG's other base, where the read
+                # covers it (see _STRAND_CONTRADICTION_WARNING_RATE).
+                partner_pos = query_position.get(partner_ref_pos)
+                if partner_pos is not None:
+                    strand_checks += 1
+                    if sequence[partner_pos] == contradicting_base:
+                        strand_contradictions += 1
 
         # The CpG at index i of the sorted cpg_sites is column col_offset + i.
         read_cols = list(range(col_offset + start_idx, col_offset + end_idx))
@@ -1018,6 +1072,8 @@ def _extract_chromosome(
         tlens=_as_array(tlen_list),
         missing=False,
         reads_without_md=reads_without_md,
+        strand_checks=strand_checks,
+        strand_contradictions=strand_contradictions,
     )
 
 
@@ -1097,6 +1153,17 @@ def extract_methylation_data_from_bam(
         3. Reads the base there: top strand C=methylated(1),
            T=unmethylated(0); bottom strand G=methylated(1),
            A=unmethylated(0); anything else=-1
+
+    **Strand-tag check.** Decoding from bases relies on the strand tag
+    being right. It is checked against the reads themselves: the base of
+    a CpG that the tag says cannot be converted (the G for a top-strand
+    read, the C for a bottom-strand read) is examined wherever a read
+    covers it. If more than 2% of at least 1,000 such CpGs show the other
+    strand's conversion product, a ``RuntimeWarning`` reports it. That
+    pattern means many reads are mis-tagged — typically a non-directional
+    library aligned by an aligner that assumes a directional one — and
+    that their CpGs have been called methylated regardless of their true
+    state. With ``verbose=True`` the counts are printed for every BAM.
 
     Args:
         input_bam: Path to the input BAM file. The file must be indexed
@@ -1286,6 +1353,8 @@ def extract_methylation_data_from_bam(
     cpgs_per_fragment_chunks: list[np.ndarray] = []
     tlen_chunks: list[np.ndarray] = []
     reads_without_md = 0
+    strand_checks = 0
+    strand_contradictions = 0
 
     for chrom, chrom_result in tqdm(
         _iter_chrom_results(), total=len(chrom_tasks), disable=not verbose
@@ -1295,6 +1364,8 @@ def extract_methylation_data_from_bam(
                 tqdm.write(f"Chromosome {chrom} not found in BAM file, skipping.")
             continue
         reads_without_md += chrom_result.reads_without_md
+        strand_checks += chrom_result.strand_checks
+        strand_contradictions += chrom_result.strand_contradictions
         if len(chrom_result.cpgs_per_fragment) == 0:
             continue
         col_chunks.append(chrom_result.cols)
@@ -1311,6 +1382,35 @@ def extract_methylation_data_from_bam(
             RuntimeWarning,
             stacklevel=2,
         )
+
+    if strand_checks:
+        contradiction_rate = strand_contradictions / strand_checks
+        if verbose:
+            print(
+                f"\tStrand-tag check: {strand_contradictions:,} of "
+                f"{strand_checks:,} CpGs ({contradiction_rate:.3%}) contradict "
+                "their read's strand tag."
+            )
+        if (
+            strand_checks >= _STRAND_CHECK_MIN_CPGS
+            and contradiction_rate > _STRAND_CONTRADICTION_WARNING_RATE
+        ):
+            warnings.warn(
+                f"{strand_contradictions:,} of {strand_checks:,} CpGs "
+                f"({contradiction_rate:.1%}) in {input_bam} show a conversion "
+                "on the strand opposite to their read's strand tag. Correctly "
+                "tagged reads do this only through sequencing errors and SNPs "
+                "(well under 1%). A rate this high means the strand tags do "
+                "not describe many of the reads, as happens when a "
+                "non-directional library is aligned with an aligner that "
+                "assumes a directional one (such as bwa-meth). CpGs in those "
+                "reads are called methylated whatever their true state, so "
+                "this output should not be trusted; re-align with a tool that "
+                "models non-directional libraries (for example Bismark with "
+                "--non_directional).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     def _concatenate(chunks: list[np.ndarray], dtype: type) -> np.ndarray:
         # Concatenate straight into the final dtype, then drop the chunks so

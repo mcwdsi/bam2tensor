@@ -11,7 +11,10 @@ extractor's contract in a few lines: one row per fragment, the calls of its
 mates merged, in the order fragments first appear.
 """
 
+import bisect
 import collections
+import re
+import warnings
 
 import numpy as np
 import pysam
@@ -996,3 +999,172 @@ def test_retained_cytosine_count_is_exact(biscuit_dataset, sim_embedding) -> Non
 
     # The cases the index exists for do occur: methylated CpGs cut by a read end.
     assert off_by_one_without_index > 0
+
+
+# ---------------------------------------------------------------------------
+# Strand-tag check
+# ---------------------------------------------------------------------------
+
+STRAND_CHECK_LINE = re.compile(r"Strand-tag check: ([\d,]+) of ([\d,]+) CpGs")
+STRAND_WARNING = re.compile(r"([\d,]+) of ([\d,]+) CpGs \(")
+
+
+def _counts(pattern, text: str) -> tuple[int, int]:
+    """(contradictions, CpGs checked) parsed from a report line or warning."""
+    match = pattern.search(text)
+    assert match is not None, text
+    contradictions, checked = (int(g.replace(",", "")) for g in match.groups())
+    return contradictions, checked
+
+
+def _expected_strand_check(dataset: SimulatedDataset, emb) -> tuple[int, int]:
+    """Count contradictions straight from the simulated reads.
+
+    For every read the extractor decodes, and every CpG whose C and G the
+    read both covers, look at the base the read's *tag* says is never
+    converted: the G if tagged top strand, the C if tagged bottom strand.
+    """
+    contradictions = checked = 0
+    for read in dataset.reads:
+        if not _passes_read_filters(read, 20):
+            continue
+        tagged_bottom = read.bottom_strand != read.mistagged
+        sites = emb.cpg_sites_dict[read.chrom]
+        end = read.start + len(read.sequence)
+        first = bisect.bisect_left(sites, read.start + 1)
+        last = bisect.bisect_right(sites, end - 1)
+        for position in sites[first:last]:  # 1-based position of the CpG's C
+            partner = position - 1 if tagged_bottom else position
+            checked += 1
+            base = read.sequence[partner - read.start]
+            contradictions += base == ("T" if tagged_bottom else "A")
+    return contradictions, checked
+
+
+@pytest.fixture(scope="module")
+def mistagged_dataset(tmp_path_factory) -> SimulatedDataset:
+    """Biscuit-style reads in which 40% of fragments carry the wrong strand tag."""
+    return simulate_bam(
+        str(tmp_path_factory.mktemp("mistagged")),
+        TEST_FASTA,
+        aligner="biscuit",
+        chromosomes=CHROMOSOMES,
+        seed=SEED,
+        mistagged_fraction=0.4,
+    )
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_correctly_tagged_reads_pass_the_strand_check(
+    biscuit_dataset, sim_embedding, capsys, threads
+) -> None:
+    """Sequencing errors alone stay far below the warning level."""
+    expected = _expected_strand_check(biscuit_dataset, sim_embedding)
+    contradictions, checked = expected
+    # The simulator misreads a small share of partner bases, as real
+    # sequencing does: some contradictions, well under 2%.
+    assert checked > 1000
+    assert 0 < contradictions < 0.02 * checked
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        functions.extract_methylation_data_from_bam(
+            input_bam=biscuit_dataset.bam_path,
+            genome_methylation_embedding=sim_embedding,
+            threads=threads,
+            verbose=True,
+        )
+    assert _counts(STRAND_CHECK_LINE, capsys.readouterr().out) == expected
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_mistagged_reads_trigger_the_strand_warning(
+    mistagged_dataset, sim_embedding, threads
+) -> None:
+    """Reads whose tag contradicts their bases are reported, with exact counts.
+
+    This is what bwa-meth does to most complementary-strand pairs of a
+    non-directional library: the bases are fine, the tag is wrong, and the
+    extractor — trusting the tag — reads the wrong base of every CpG.
+    """
+    assert any(read.mistagged for read in mistagged_dataset.reads)
+    assert not all(read.mistagged for read in mistagged_dataset.reads)
+    expected = _expected_strand_check(mistagged_dataset, sim_embedding)
+    assert expected[0] > 0.02 * expected[1]
+
+    with pytest.warns(RuntimeWarning) as recorded:
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=mistagged_dataset.bam_path,
+            genome_methylation_embedding=sim_embedding,
+            threads=threads,
+        )
+
+    assert len(recorded) == 1
+    message = str(recorded[0].message)
+    # The same totals whether counted in one process or summed over workers.
+    assert _counts(STRAND_WARNING, message) == expected
+    assert mistagged_dataset.bam_path in message
+    assert "non-directional" in message
+    # It is a warning: the (unreliable) result is still returned.
+    assert result.matrix.shape[0] > 0
+
+
+def test_mistagged_reads_are_decoded_as_methylated(
+    mistagged_dataset, biscuit_dataset, sim_embedding
+) -> None:
+    """Why the warning matters: wrong tags inflate methylation.
+
+    A mis-tagged read is decoded on the base its strand never converts, so
+    every CpG in it reads as methylated.
+    """
+
+    def methylated_fraction(dataset):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = functions.extract_methylation_data_from_bam(
+                input_bam=dataset.bam_path, genome_methylation_embedding=sim_embedding
+            )
+        calls = result.matrix.data[result.matrix.data >= 0]
+        return float(calls.mean())
+
+    correct = methylated_fraction(biscuit_dataset)
+    inflated = methylated_fraction(mistagged_dataset)
+    assert inflated > correct + 0.05
+
+
+def test_bismark_reads_are_not_strand_checked(
+    bismark_dataset, sim_embedding, capsys
+) -> None:
+    """Bismark's own strand resolution is trusted: no check, no report line."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        functions.extract_methylation_data_from_bam(
+            input_bam=bismark_dataset.bam_path,
+            genome_methylation_embedding=sim_embedding,
+            verbose=True,
+        )
+    assert "Strand-tag check" not in capsys.readouterr().out
+
+
+def test_cli_reports_the_strand_warning(mistagged_dataset, tmp_path) -> None:
+    """The CLI shows the warning in the BAM's report and still writes the file."""
+    result = CliRunner().invoke(
+        __main__.main,
+        [
+            "--input-path",
+            mistagged_dataset.bam_path,
+            "--reference-fasta",
+            TEST_FASTA,
+            "--genome-name",
+            "simulated_mistagged",
+            "--expected-chromosomes",
+            ",".join(CHROMOSOMES),
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "  WARNING: " in result.output
+    assert "strand tag" in result.output
+    assert "Processed:     1 BAM(s)" in result.output
+    assert (tmp_path / "out" / "simulated.biscuit.methylation.npz").exists()

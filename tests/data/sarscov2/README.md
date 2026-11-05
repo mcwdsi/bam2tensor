@@ -9,10 +9,13 @@ down each aligner's tag conventions in a way hand-built reads cannot.
 | `genome.fasta` | Reference, SARS-CoV-2 isolate MT192765.1 (29,829 bp, 438 CpGs) |
 | `bismark.bam` | 557 read pairs aligned with Bismark v0.23.0 (`XM`, `XR`, `XG` tags) |
 | `bwameth.bam` | The same 557 read pairs aligned with bwa-meth 0.2.0 (`YD`, `YC` tags) |
+| `bwameth_nondirectional.bam` | 634 further read pairs that only bwa-meth aligned: complementary-strand pairs, most with a `YD` tag that contradicts their bases |
 | `make_subset.py` | Script that produced the two BAMs from the upstream files |
 
-Both BAMs contain the same fragments, so extracting either must give the same
-matrix. See `tests/test_real_aligners.py`.
+`bismark.bam` and `bwameth.bam` contain the same fragments, so extracting
+either must give the same matrix. `bwameth_nondirectional.bam` is the opposite
+kind of fixture: real output that should *not* be trusted, which the
+strand-tag check must flag. See `tests/test_real_aligners.py`.
 
 ## Source and licence
 
@@ -24,8 +27,8 @@ branch, `data/genomics/sarscov2/`), redistributed under its MIT licence; see
 - `illumina/bam/test.paired_end.methylated.sorted.bam` (bwa-meth)
 - `genome/genome.fasta` (bundled unchanged)
 
-Every ninth fragment that both aligners placed was kept; `make_subset.py`
-records exactly how.
+Every ninth fragment that both aligners placed was kept, and every sixth
+fragment that only bwa-meth placed; `make_subset.py` records exactly how.
 
 ## Things worth knowing about this data
 
@@ -43,6 +46,8 @@ records exactly how.
   pairs from the original top and bottom strands; bwa-meth also aligned the
   complementary-strand pairs, but gives most of them a `YD` tag that
   contradicts their bases. Keeping only fragments that both aligners placed
-  leaves exactly the directional pairs, for which the tags are right.
+  leaves exactly the directional pairs, for which the tags are right
+  (`bismark.bam`, `bwameth.bam`). A sample of the rest is kept separately in
+  `bwameth_nondirectional.bam`.
 
 [nf-core/test-datasets]: https://github.com/nf-core/test-datasets

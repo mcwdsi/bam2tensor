@@ -634,7 +634,16 @@ The strand tag says which strand of the original DNA a fragment derives from, an
 
 Extraction has been checked against real Bismark and bwa-meth output for the same reads, which must — and do — give identical matrices. Biscuit shares bwa-meth's `YD` convention. The gem3 `XB` path follows its documented meaning but has not been checked against real gem3 output.
 
-**Directional libraries.** bam2tensor trusts the aligner's strand tag. bwa-meth assumes a directional library (read 1 from the original top or bottom strand, as in standard WGBS and EM-seq preps). If a non-directional library (PBAT and some single-cell protocols, where read 1 may come from a complementary strand) is aligned with bwa-meth, most of the complementary-strand pairs receive a `YD` tag that contradicts their bases, and their CpGs are then called methylated regardless of their true state. This is a property of the alignment, not something bam2tensor can detect from the tags; align non-directional libraries with a tool that models them (for example Bismark with `--non_directional`, whose `XG` tag remains correct).
+**Directional libraries and the strand-tag check.** For Biscuit, bwameth and gem3, bam2tensor decodes each read on the strength of the aligner's strand tag. bwa-meth assumes a directional library (read 1 from the original top or bottom strand, as in standard WGBS and EM-seq preps). If a non-directional library (PBAT and some single-cell protocols, where read 1 may come from a complementary strand) is aligned with bwa-meth, most of the complementary-strand pairs receive a `YD` tag that contradicts their bases, and their CpGs are then called methylated regardless of their true state.
+
+bam2tensor checks for this. A read reports on one strand, so only one base of each CpG can show a conversion; the other base (the `G` for a top-strand read, the `C` for a bottom-strand read) never does. bam2tensor looks at that other base wherever a read covers it, and counts the CpGs where it shows the *other* strand's conversion product. In correctly tagged data that happens only through sequencing errors and SNPs. If more than 2% of at least 1,000 checked CpGs contradict their read's tag, the BAM's report carries a warning:
+
+```
+  WARNING: 245 of 1,542 CpGs (15.9%) in sample.bam show a conversion on the
+  strand opposite to their read's strand tag. [...]
+```
+
+The file is still written, but it should not be trusted: re-align the library with a tool that models non-directional data (for example Bismark with `--non_directional`, whose `XG` tag remains correct). With `--verbose` the counts are printed for every BAM, warning or not, which is a quick way to see how far below the limit your own data sits. Bismark BAMs are not checked, because Bismark resolves the strand itself.
 
 **Note:** EM-seq (enzymatic methyl-seq) data produces the same C-to-T conversion pattern as bisulfite sequencing and is fully supported when aligned with any of the above tools.
 

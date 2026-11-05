@@ -148,7 +148,8 @@ Every read is decoded at its fragment's informative base. The read's own alignme
 - Biscuit aligner: `YD` tag (f = top, r = bottom); call read from the base
 - bwameth aligner: `YD` tag (same format as Biscuit)
 - gem3/blueprint aligner: `XB` tag (C = top, G = bottom); not verified against real gem3 output
-- The strand tag is trusted. It is correct for directional libraries. bwa-meth mis-tags most complementary-strand (CTOT/CTOB) pairs of a non-directional library, so such data decodes wrongly; this cannot be detected from the tags (the upstream nf-core bwa-meth test BAM contains such pairs, which is why the bundled fixture keeps only fragments Bismark also aligned).
+- The strand tag is trusted. It is correct for directional libraries. bwa-meth mis-tags most complementary-strand (CTOT/CTOB) pairs of a non-directional library, so such data decodes wrongly (every CpG in a mis-tagged read is called methylated).
+- **Strand-tag check**: for reads decoded from their bases, the extractor also looks at each CpG's *other* base, which the read's strand never converts (G for top-strand reads, C for bottom-strand). A conversion product there (A at the G, T at the C) contradicts the tag. Counts are summed per BAM; `--verbose` prints them, and a `RuntimeWarning` fires when more than 2% of at least 1,000 checked CpGs contradict (`_STRAND_CONTRADICTION_WARNING_RATE`, `_STRAND_CHECK_MIN_CPGS` in `functions.py`). It warns only; it cannot repair the calls. `tests/data/sarscov2/bwameth_nondirectional.bam` holds real mis-tagged pairs (15.9% contradictions); `bwameth.bam` holds only directional pairs (0%).
 
 ### Dependencies
 - pysam: BAM file handling
