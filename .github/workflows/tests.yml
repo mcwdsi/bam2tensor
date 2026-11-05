@@ -7,8 +7,10 @@ on:
       - master
   pull_request:
 
+# One group per ref: a new push cancels the superseded run for the same
+# branch/PR, but never a run that belongs to a different branch/PR.
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
