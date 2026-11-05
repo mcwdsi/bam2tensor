@@ -58,7 +58,9 @@ def inspect_npz(npz_path: str) -> None:
 
     Loads the sparse matrix and any embedded metadata, then prints
     matrix dimensions, data-point counts, sparsity, provenance
-    information, and file size.
+    information, and file size. Rows are labelled as fragments or reads
+    according to the file's output format version (see
+    :mod:`bam2tensor.metadata`).
 
     Args:
         npz_path: Path to the ``.npz`` file to inspect.
@@ -67,20 +69,26 @@ def inspect_npz(npz_path: str) -> None:
         >>> # xdoctest: +SKIP
         >>> inspect_npz("sample.methylation.npz")
         sample.methylation.npz
-          Reads:           1,423
+          Fragments:       1,423
           CpG sites:       28,217,448
           ...
     """
     # Load matrix
     matrix = scipy.sparse.load_npz(npz_path)
-    n_reads, n_cpgs = matrix.shape
+    n_rows, n_cpgs = matrix.shape
     n_data = matrix.nnz
-    total_cells = int(np.prod(matrix.shape)) if n_reads > 0 else 0
+    total_cells = int(np.prod(matrix.shape)) if n_rows > 0 else 0
     sparsity = 1 - (n_data / total_cells) if total_cells > 0 else 0.0
     file_size = os.path.getsize(npz_path)
 
     # Load metadata (may be None for old files)
     meta = read_npz_metadata(npz_path)
+
+    # What a row is depends on the output format. Files without a
+    # format_version predate fragment rows: one row per read.
+    format_version = meta.get("format_version", 1) if meta else 1
+    row_unit = meta.get("row_unit", "read") if meta else "read"
+    row_label = "Fragments:" if row_unit == "fragment" else "Reads:"
 
     # Print summary
     print(os.path.basename(npz_path))
@@ -99,7 +107,7 @@ def inspect_npz(npz_path: str) -> None:
             )
         print(f"  Chromosomes:     {chrom_display}")
 
-    print(f"  Reads:           {n_reads:,}")
+    print(f"  {row_label:<17}{n_rows:,}")
     print(f"  CpG sites:       {n_cpgs:,}")
     print(f"  Data points:     {n_data:,} (sparsity: {sparsity:.2%})")
 
@@ -135,6 +143,7 @@ def inspect_npz(npz_path: str) -> None:
         else:
             print("  Filters:         none")
 
+    print(f"  Format:          v{format_version} (one row per {row_unit})")
     if meta and "cpg_index_crc32" in meta:
         print(f"  CpG index CRC32: {meta['cpg_index_crc32']}")
     if meta and "bam2tensor_version" in meta:

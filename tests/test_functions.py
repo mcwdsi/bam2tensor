@@ -142,7 +142,7 @@ def _make_bam_with_reads(tmp_path, reads, seq_len=150):
     """
     fasta_path = tmp_path / "ref.fa"
     if not fasta_path.exists():
-        # Place CpGs at positions 10, 20, 100, 110 (1-based)
+        # CpGs with their C at 1-based positions 10, 21, 102, 113
         seq = (
             "N" * 9
             + "CG"
@@ -323,77 +323,41 @@ def test_paired_read_flag_not_skipped(tmp_path):
 
 
 # ======================================================================
-# C: Strand check early-exit tests
+# C: Bisulfite strand and alignment orientation
 # ======================================================================
 
+# 0-based reference positions of the C and the G of each CpG in the
+# _make_bam_with_reads reference (N*9 CG N*9 CG N*79 CG N*9 CG N*40).
+_CPG_C_POSITIONS = [9, 20, 101, 112]
+_CPG_G_POSITIONS = [10, 21, 102, 113]
 
-def test_daughter_strand_skipped_yd(tmp_path):
-    """Forward read with YD=r (reverse parent) is on daughter strand and skipped."""
+
+def _read_with_bases(positions, bases, seq_len=150):
+    """A read sequence of N with the given bases at the given 0-based positions."""
+    seq = ["N"] * seq_len
+    for position, base in zip(positions, bases):
+        seq[position] = base
+    return "".join(seq)
+
+
+@pytest.mark.parametrize("flag", [0, 0x10], ids=["forward", "reverse"])
+@pytest.mark.parametrize("tag", [("YD", "f"), ("XB", "C")], ids=["YD=f", "XB=C"])
+def test_top_strand_fragment_is_read_at_the_c(tmp_path, flag, tag):
+    """A top-strand fragment is decoded at the C of each CpG, in either orientation.
+
+    BAM stores reads in top-strand orientation, so the forward mate (read 1)
+    and the reverse mate (read 2) of a top-strand pair both show C
+    (methylated) or T (unmethylated) at the C.
+    """
     emb, bam_path = _make_bam_with_reads(
         tmp_path,
         [
             {
-                "name": "daughter_yd",
-                "flag": 0,  # forward
+                "name": "top",
+                "flag": flag,
                 "mapq": 60,
-                "tags": [("MD", "150"), ("YD", "r")],  # reverse parent strand
-            },
-        ],
-    )
-    result = functions.extract_methylation_data_from_bam(
-        input_bam=bam_path, genome_methylation_embedding=emb
-    )
-    assert result.matrix.shape[0] == 0
-
-
-def test_parent_strand_kept_yd_reverse(tmp_path):
-    """Reverse read with YD=r is on the parent strand and processed."""
-    emb, bam_path = _make_bam_with_reads(
-        tmp_path,
-        [
-            {
-                "name": "parent_rev",
-                "flag": 0x10,  # reverse strand
-                "mapq": 60,
-                "tags": [("MD", "150"), ("YD", "r")],  # reverse parent strand
-            },
-        ],
-    )
-    result = functions.extract_methylation_data_from_bam(
-        input_bam=bam_path, genome_methylation_embedding=emb
-    )
-    assert result.matrix.shape[0] == 1
-
-
-def test_daughter_strand_skipped_xb(tmp_path):
-    """Forward read with XB=G (reverse parent) is on daughter strand and skipped."""
-    emb, bam_path = _make_bam_with_reads(
-        tmp_path,
-        [
-            {
-                "name": "daughter_xb",
-                "flag": 0,  # forward
-                "mapq": 60,
-                "tags": [("MD", "150"), ("XB", "G")],  # reverse parent strand
-            },
-        ],
-    )
-    result = functions.extract_methylation_data_from_bam(
-        input_bam=bam_path, genome_methylation_embedding=emb
-    )
-    assert result.matrix.shape[0] == 0
-
-
-def test_parent_strand_kept_xb_forward(tmp_path):
-    """Forward read with XB=C (forward parent) is on the parent strand."""
-    emb, bam_path = _make_bam_with_reads(
-        tmp_path,
-        [
-            {
-                "name": "parent_xb",
-                "flag": 0,  # forward
-                "mapq": 60,
-                "tags": [("MD", "150"), ("XB", "C")],  # forward parent strand
+                "seq": _read_with_bases(_CPG_C_POSITIONS, "CTCT"),
+                "tags": [("MD", "150"), tag],
             },
         ],
     )
@@ -401,10 +365,67 @@ def test_parent_strand_kept_xb_forward(tmp_path):
         input_bam=bam_path, genome_methylation_embedding=emb
     )
     assert result.matrix.shape[0] == 1
+    assert result.matrix.col.tolist() == [0, 1, 2, 3]
+    assert result.matrix.data.tolist() == [1, 0, 1, 0]
+
+
+@pytest.mark.parametrize("flag", [0, 0x10], ids=["forward", "reverse"])
+@pytest.mark.parametrize("tag", [("YD", "r"), ("XB", "G")], ids=["YD=r", "XB=G"])
+def test_bottom_strand_fragment_is_read_at_the_g(tmp_path, flag, tag):
+    """A bottom-strand fragment is decoded at the G of each CpG, in either orientation.
+
+    Regression: a forward read tagged as bottom strand (read 2 of a
+    bottom-strand pair) used to be discarded as an uninformative "daughter
+    strand", as was a reverse read tagged as top strand. Both mates of a pair
+    carry the same strand tag and the same information, so half of every
+    paired-end library was thrown away.
+    """
+    emb, bam_path = _make_bam_with_reads(
+        tmp_path,
+        [
+            {
+                "name": "bottom",
+                "flag": flag,
+                "mapq": 60,
+                # C at every CpG's C position (it is not informative here),
+                # G / A at the G positions.
+                "seq": _read_with_bases(
+                    _CPG_C_POSITIONS + _CPG_G_POSITIONS, "CCCC" + "GAGA"
+                ),
+                "tags": [("MD", "150"), tag],
+            },
+        ],
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb
+    )
+    assert result.matrix.shape[0] == 1
+    assert result.matrix.col.tolist() == [0, 1, 2, 3]
+    assert result.matrix.data.tolist() == [1, 0, 1, 0]
+
+
+def test_strand_tag_decides_which_base_is_read(tmp_path):
+    """The same read decodes differently under the two strand tags.
+
+    With C at every C and A at every G: methylated everywhere if the fragment
+    is top strand, unmethylated everywhere if it is bottom strand.
+    """
+    seq = _read_with_bases(_CPG_C_POSITIONS + _CPG_G_POSITIONS, "CCCC" + "AAAA")
+    for tag, expected in ((("YD", "f"), [1, 1, 1, 1]), (("YD", "r"), [0, 0, 0, 0])):
+        directory = tmp_path / tag[1]
+        directory.mkdir()
+        emb, bam_path = _make_bam_with_reads(
+            directory,
+            [{"name": "read", "flag": 0, "mapq": 60, "seq": seq, "tags": [tag]}],
+        )
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=bam_path, genome_methylation_embedding=emb
+        )
+        assert result.matrix.data.tolist() == expected
 
 
 def test_no_strand_tag_skipped(tmp_path):
-    """Read with no YD or XB tag has bisulfite_parent_strand_is_reverse=None, skipped."""
+    """A read with no strand tag (no XM, YD or XB) cannot be decoded and is skipped."""
     emb, bam_path = _make_bam_with_reads(
         tmp_path,
         [
@@ -419,7 +440,6 @@ def test_no_strand_tag_skipped(tmp_path):
     result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    # bisulfite_parent_strand_is_reverse=None != is_reverse=False, so skipped
     assert result.matrix.shape[0] == 0
 
 
@@ -443,18 +463,18 @@ def test_low_mapq_skipped_before_strand_check(tmp_path):
 
 
 def test_mixed_reads_correct_count(tmp_path):
-    """Mix of good, flagged, and daughter-strand reads yields correct count."""
+    """Mix of usable and filtered reads yields the correct number of rows."""
     emb, bam_path = _make_bam_with_reads(
         tmp_path,
         [
-            # Good: forward read, YD=f, parent strand
+            # Good: forward read of a top-strand fragment
             {
                 "name": "good1",
                 "flag": 0,
                 "mapq": 60,
                 "tags": [("MD", "150"), ("YD", "f")],
             },
-            # Good: reverse read, YD=r, parent strand
+            # Good: reverse read of a bottom-strand fragment
             {
                 "name": "good2",
                 "flag": 0x10,
@@ -468,9 +488,9 @@ def test_mixed_reads_correct_count(tmp_path):
                 "mapq": 60,
                 "tags": [("MD", "150"), ("YD", "f")],
             },
-            # Bad: daughter strand (forward read + YD=r)
+            # Good: forward read of a bottom-strand fragment (its read 2)
             {
-                "name": "bad_daughter",
+                "name": "good3",
                 "flag": 0,
                 "mapq": 60,
                 "tags": [("MD", "150"), ("YD", "r")],
@@ -494,7 +514,7 @@ def test_mixed_reads_correct_count(tmp_path):
     result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    assert result.matrix.shape[0] == 2  # only good1 and good2
+    assert result.matrix.shape[0] == 3  # good1, good2 and good3
 
 
 def test_skip_flags_constant():
@@ -687,7 +707,7 @@ def test_bismark_low_mapq_skipped(tmp_path):
 
 
 def test_bismark_both_strands_processed(tmp_path):
-    """Bismark processes both forward and reverse reads (no strand filtering)."""
+    """Bismark reads are used whether they align forward or reverse."""
     xm = _make_xm_string(154, {9: "Z", 20: "z"})
     emb, bam_path = _make_bismark_bam(
         tmp_path,
@@ -701,7 +721,7 @@ def test_bismark_both_strands_processed(tmp_path):
     result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    # Both reads should be processed (no daughter-strand filtering for Bismark)
+    # Two unpaired reads with different names: two fragments.
     assert result.matrix.shape[0] == 2
 
 
@@ -717,7 +737,7 @@ def test_bismark_xm_takes_priority_over_yd(tmp_path):
                 "flag": 0,
                 "mapq": 60,
                 "xm_string": xm,
-                # YD=r + flag=0 (forward) → would be daughter strand → skipped by YD path
+                # YD=r would mean "bottom strand, read the G" on the YD path
                 "extra_tags": [("YD", "r")],
             },
         ],
@@ -725,7 +745,7 @@ def test_bismark_xm_takes_priority_over_yd(tmp_path):
     result = functions.extract_methylation_data_from_bam(
         input_bam=bam_path, genome_methylation_embedding=emb
     )
-    # XM path should process it (not skip as daughter strand)
+    # The XM calls (at the C positions) are used, not the bases under YD.
     assert result.matrix.shape[0] == 1
     assert all(v == 1 for v in result.matrix.data)
 
@@ -1448,8 +1468,8 @@ def _make_bam_from_segments(tmp_path, build_segments, seq_len=150):
 
     ``build_segments`` receives the BAM header and returns the
     ``pysam.AlignedSegment`` objects to write, in coordinate order. Uses the
-    same reference as ``_make_bam_with_reads`` (CpGs at 1-based 10, 20, 100,
-    110).
+    same reference as ``_make_bam_with_reads`` (CpG cytosines at 1-based 10,
+    21, 102, 113).
     """
     fasta_path = tmp_path / "ref.fa"
     seq = "N" * 9 + "CG" + "N" * 9 + "CG" + "N" * 79 + "CG" + "N" * 9 + "CG" + "N" * 40
