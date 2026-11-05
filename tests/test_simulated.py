@@ -14,6 +14,7 @@ mates merged, in the order fragments first appear.
 import collections
 
 import numpy as np
+import pysam
 import pytest
 import scipy.sparse
 from click.testing import CliRunner
@@ -356,8 +357,8 @@ def test_biscuit_filters_match_truth(
     The non-converted filter is evaluated per read and removes the whole
     fragment; the EM over-conversion filter looks at the merged fragment.
     """
-    # The reference-validated count can differ from the true count by one at a
-    # read boundary; the simulator keeps every read well clear of the threshold.
+    # The simulator keeps every read well clear of the threshold, so each
+    # read's status is unambiguous.
     assert all(
         read.retained_non_cpg == 0 or read.retained_non_cpg > 4
         for read in biscuit_dataset.reads
@@ -959,3 +960,39 @@ def test_workers_are_not_sent_the_embedding(biscuit_dataset, sim_embedding) -> N
     _assert_matches_truth(
         result, _expected(biscuit_dataset, sim_embedding), sim_embedding
     )
+
+
+# ---------------------------------------------------------------------------
+# Non-converted filter: the count itself
+# ---------------------------------------------------------------------------
+
+
+def test_retained_cytosine_count_is_exact(biscuit_dataset, sim_embedding) -> None:
+    """For every simulated read, the reference-validated count equals the truth.
+
+    With the CpG index supplying CpG context the count is exact for both
+    strands and both mates, including reads that begin or end inside a CpG.
+    """
+    cpgs = {
+        chrom: {position - 1 for position in positions}
+        for chrom, positions in sim_embedding.cpg_sites_dict.items()
+    }
+    with pysam.AlignmentFile(biscuit_dataset.bam_path) as bam:
+        segments = list(bam.fetch())
+    assert len(segments) == len(biscuit_dataset.reads)
+
+    off_by_one_without_index = 0
+    for segment, read in zip(segments, biscuit_dataset.reads):
+        assert segment.query_name == read.name
+        exact = functions.count_non_cpg_retained_reference(
+            segment, read.bottom_strand, cpgs[read.chrom]
+        )
+        assert exact == read.retained_non_cpg, read.name
+        inferred = functions.count_non_cpg_retained_reference(
+            segment, read.bottom_strand
+        )
+        assert inferred - exact in (0, 1)
+        off_by_one_without_index += inferred - exact
+
+    # The cases the index exists for do occur: methylated CpGs cut by a read end.
+    assert off_by_one_without_index > 0

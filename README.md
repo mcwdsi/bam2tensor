@@ -174,6 +174,8 @@ Each BAM file will generate a corresponding `.methylation.npz` file in the same 
 
 If a BAM cannot be processed (for example its index is missing, or its chromosome names do not match the reference), bam2tensor reports the error, carries on with the remaining files, and lists the failures in the final summary. The exit status is `1` if any BAM failed and `0` otherwise, so schedulers and pipelines can detect a partial failure.
 
+Each output file is written under a temporary name and renamed into place once it is complete. An interrupted run therefore never leaves a partial `.methylation.npz` behind, and re-running the same command (without `--overwrite`) safely picks up where it stopped: finished files are skipped, unfinished ones are redone.
+
 ### Custom Output Directory
 
 Write output files to a specific directory instead of next to the input BAMs:
@@ -308,6 +310,8 @@ Ports the logic of [nebiolabs/mark-nonconverted-reads](https://github.com/nebiol
 
 - **Bismark BAMs**: counted directly from the `XM` tag's uppercase `H`/`X`/`U` characters (retained cytosines in CHH/CHG/unknown contexts).
 - **Biscuit / bwameth / gem3 BAMs**: counted by comparing the read to the reference via the `MD` tag (using pysam's `get_aligned_pairs(with_seq=True)`). SNPs — where the read's retained `C` sits over a reference base that isn't `C` — are excluded from the count, matching NEB's reference-validation step. No separate FASTA reload is required. Reads **without** an `MD` tag cannot be evaluated: they are kept, and bam2tensor prints a warning with the number of affected reads. If your aligner did not write `MD` tags, add them first with `samtools calmd`.
+
+  Cytosines in CpG context are exempt, as in the NEB tool; which ones those are is taken from the CpG index, so it is exact even for a CpG cut by the end of a read. The count is otherwise only as good as the `MD` tag. bwa-meth writes `MD` relative to its converted reference: for directional libraries this gives the same count as checking against the FASTA, except that a read `C` over a reference `T` (a SNP that conversion makes invisible) is counted as retained. For a non-directional library aligned with bwa-meth the tag no longer describes the read, and retained cytosines are undercounted.
 
 ### `--filter-em-overconversion` — EM-seq fragment-level over-conversion
 
@@ -629,6 +633,8 @@ bam2tensor supports BAM files from bisulfite-aware and EM-seq-aware aligners tha
 The strand tag says which strand of the original DNA a fragment derives from, and so which base carries the call for each CpG (see [How Reads Become Rows](#how-reads-become-rows)). Both mates of a pair carry the same value. For Biscuit, bwameth and gem3 the call is read from the base itself; for Bismark it is read from the `XM` string, which Bismark writes on the `C` of the CpG for top-strand alignments and on the `G` for bottom-strand ones. If a Bismark-style BAM has no `XG` tag, the strand is inferred from the bases the calls sit on.
 
 Extraction has been checked against real Bismark and bwa-meth output for the same reads, which must — and do — give identical matrices. Biscuit shares bwa-meth's `YD` convention. The gem3 `XB` path follows its documented meaning but has not been checked against real gem3 output.
+
+**Directional libraries.** bam2tensor trusts the aligner's strand tag. bwa-meth assumes a directional library (read 1 from the original top or bottom strand, as in standard WGBS and EM-seq preps). If a non-directional library (PBAT and some single-cell protocols, where read 1 may come from a complementary strand) is aligned with bwa-meth, most of the complementary-strand pairs receive a `YD` tag that contradicts their bases, and their CpGs are then called methylated regardless of their true state. This is a property of the alignment, not something bam2tensor can detect from the tags; align non-directional libraries with a tool that models them (for example Bismark with `--non_directional`, whose `XG` tag remains correct).
 
 **Note:** EM-seq (enzymatic methyl-seq) data produces the same C-to-T conversion pattern as bisulfite sequencing and is fully supported when aligned with any of the above tools.
 

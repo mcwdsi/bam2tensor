@@ -285,3 +285,44 @@ def test_cli_on_real_bismark_output(tmp_path) -> None:
     assert metadata is not None
     assert metadata["format_version"] == 2
     assert metadata["row_unit"] == "fragment"
+
+
+def test_retained_cytosine_count_matches_the_reference_on_real_bwameth_output(
+    sarscov2_embedding,
+) -> None:
+    """On real bwa-meth output the filter's count equals a count from the FASTA.
+
+    bwa-meth writes its ``MD`` tag against a converted reference, so this is
+    the check that the tag still yields the right answer for the directional
+    read pairs bwa-meth is designed for.
+    """
+    reference = "".join(
+        line.strip() for line in open(SARSCOV2_FASTA) if not line.startswith(">")
+    ).upper()
+    cpgs = {
+        position - 1
+        for position in sarscov2_embedding.cpg_sites_dict[SARSCOV2_CHROMOSOME]
+    }
+    reads = with_retained = 0
+    with pysam.AlignmentFile(SARSCOV2_BWAMETH_BAM) as bam:
+        for read in bam.fetch():
+            bottom = _is_bottom_strand(read)
+            sequence = str(read.query_sequence)
+            from_fasta = 0
+            for query, ref in read.get_aligned_pairs(matches_only=True):
+                if bottom:
+                    retained = reference[ref] == "G" and sequence[query] == "G"
+                    in_cpg = reference[ref - 1] == "C"
+                else:
+                    retained = reference[ref] == "C" and sequence[query] == "C"
+                    in_cpg = reference[ref + 1 : ref + 2] == "G"
+                from_fasta += retained and not in_cpg
+            assert (
+                functions.count_non_cpg_retained_reference(read, bottom, cpgs)
+                == from_fasta
+            ), read.query_name
+            reads += 1
+            with_retained += from_fasta > 0
+
+    assert reads == 1114
+    assert with_retained > 500  # the comparison is not vacuous

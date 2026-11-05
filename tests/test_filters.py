@@ -727,3 +727,109 @@ def test_cli_reports_md_warning_per_bam(tmp_path) -> None:
     # A warning is not an error: the BAM is still processed and written.
     assert "Processed:     1 BAM(s)" in result.output
     assert (tmp_path / "out" / "test.methylation.npz").exists()
+
+
+# ---------------------------------------------------------------------------
+# Non-converted filter: CpG context at the ends of a read
+# ---------------------------------------------------------------------------
+
+
+def _first_segment(bam_path):
+    """The first read of a BAM."""
+    with pysam.AlignmentFile(bam_path, "rb") as bam:
+        return next(bam.fetch("chr1"))
+
+
+def test_methylated_cpg_at_read_end_is_not_a_retained_non_cpg_top(tmp_path) -> None:
+    """Top strand: a read ending on the C of a methylated CpG.
+
+    The G that makes it a CpG lies just past the read, so the read alone
+    cannot tell this C from a retained non-CpG cytosine. The CpG index can.
+    """
+    # Two real non-CpG Cs, then a CpG whose C is the read's last base.
+    ref_seq = "AAACAACAAAACG" + "A" * 7
+    emb = _make_embedding(tmp_path, ref_seq, "edge_top")
+    read = ref_seq[:12]  # ...ends on the C of the CpG, all three Cs retained
+    assert read.endswith("C") and ref_seq[11:13] == "CG"
+    bam_path = _write_bam(
+        tmp_path,
+        len(ref_seq),
+        [{"query_name": "edge", "query_sequence": read, "yd": "f", "md": "12"}],
+    )
+    segment = _first_segment(bam_path)
+    cpgs = {position - 1 for position in emb.cpg_sites_dict["chr1"]}
+    assert cpgs == {11}
+
+    # Inferred from the read alone: the CpG's C is miscounted.
+    assert count_non_cpg_retained_reference(segment, False) == 3
+    # With the CpG index: only the two genuine non-CpG Cs.
+    assert count_non_cpg_retained_reference(segment, False, cpgs) == 2
+
+    # So at the default threshold of 3 the read is kept.
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb, filter_non_converted=True
+    )
+    assert result.matrix.shape[0] == 1
+    assert result.matrix.data.tolist() == [1]
+
+
+def test_methylated_cpg_at_read_start_is_not_a_retained_non_cpg_bottom(
+    tmp_path,
+) -> None:
+    """Bottom strand: a read starting on the G of a methylated CpG."""
+    # A CpG, then two real non-CpG Gs. The read starts on the CpG's G.
+    ref_seq = "AAACGAAGAAGAAAAAAAAA"
+    emb = _make_embedding(tmp_path, ref_seq, "edge_bottom")
+    read = ref_seq[4:]
+    assert read.startswith("G") and ref_seq[3:5] == "CG"
+    bam_path = _write_bam(
+        tmp_path,
+        len(ref_seq),
+        [
+            {
+                "query_name": "edge",
+                "query_sequence": read,
+                "reference_start": 4,
+                "flag": 0x10,
+                "yd": "r",
+                "md": str(len(read)),
+            }
+        ],
+    )
+    segment = _first_segment(bam_path)
+    cpgs = {position - 1 for position in emb.cpg_sites_dict["chr1"]}
+    assert cpgs == {3}
+
+    assert count_non_cpg_retained_reference(segment, True) == 3
+    assert count_non_cpg_retained_reference(segment, True, cpgs) == 2
+
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb, filter_non_converted=True
+    )
+    assert result.matrix.shape[0] == 1
+    assert result.matrix.data.tolist() == [1]  # the CpG, read at its G
+
+
+def test_cpg_index_and_read_agree_away_from_read_ends(tmp_path) -> None:
+    """Inside the read both ways of finding CpG context give the same count."""
+    ref_seq = "AACAACGAACAACGAACAAAA"
+    emb = _make_embedding(tmp_path, ref_seq, "interior")
+    bam_path = _write_bam(
+        tmp_path,
+        len(ref_seq),
+        [
+            {
+                "query_name": "interior",
+                "query_sequence": ref_seq,
+                "yd": "f",
+                "md": str(len(ref_seq)),
+            }
+        ],
+    )
+    segment = _first_segment(bam_path)
+    cpgs = {position - 1 for position in emb.cpg_sites_dict["chr1"]}
+
+    assert count_non_cpg_retained_reference(segment, False) == 3
+    assert count_non_cpg_retained_reference(segment, False, cpgs) == 3
+    # An empty index means "no CpGs here": every retained C then counts.
+    assert count_non_cpg_retained_reference(segment, False, set()) == 5

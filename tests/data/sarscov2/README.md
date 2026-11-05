@@ -38,5 +38,11 @@ records exactly how.
 - The two aligners report different `TLEN` for dovetailed pairs (fragment
   shorter than the read length), so fragment lengths are not compared across
   them.
+- The upstream reads are a non-directional library (all four bisulfite
+  strands). Bismark, run in its default directional mode, aligned only the
+  pairs from the original top and bottom strands; bwa-meth also aligned the
+  complementary-strand pairs, but gives most of them a `YD` tag that
+  contradicts their bases. Keeping only fragments that both aligners placed
+  leaves exactly the directional pairs, for which the tags are right.
 
 [nf-core/test-datasets]: https://github.com/nf-core/test-datasets
