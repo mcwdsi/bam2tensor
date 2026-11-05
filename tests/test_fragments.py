@@ -10,6 +10,7 @@ fragment rather than a read.
 simulated truth; here every case is spelled out.
 """
 
+import re
 import warnings
 
 import numpy as np
@@ -991,3 +992,138 @@ def test_paired_extraction_is_warning_free(reads) -> None:
         assert rows_of(reads.extract(filter_em_overconversion=True)) == [
             {0: 1, 1: 1, 2: 0, 3: 0}
         ]
+
+
+# ---------------------------------------------------------------------------
+# Strand-tag check
+# ---------------------------------------------------------------------------
+
+STRAND_CHECK_LINE = re.compile(r"Strand-tag check: ([\d,]+) of ([\d,]+) CpGs")
+
+
+def strand_check_counts(output: str):
+    """(contradictions, CpGs checked) from verbose output, or None if absent."""
+    match = STRAND_CHECK_LINE.search(output)
+    if match is None:
+        return None
+    return tuple(int(group.replace(",", "")) for group in match.groups())
+
+
+@pytest.mark.parametrize(
+    "strand, bases, expected",
+    [
+        # Top-strand tag: the G of each CpG must read G. An A there is the
+        # bottom strand's conversion product.
+        pytest.param(
+            "f", {10: "G", 21: "G", 102: "G", 113: "G"}, (0, 4), id="top-clean"
+        ),
+        pytest.param(
+            "f", {10: "A", 21: "G", 102: "A", 113: "G"}, (2, 4), id="top-two-a"
+        ),
+        # Any other base at the G is an ordinary mismatch, not a contradiction.
+        pytest.param(
+            "f", {10: "T", 21: "C", 102: "N", 113: "G"}, (0, 4), id="top-other"
+        ),
+        # Bottom-strand tag: the C of each CpG must read C; a T contradicts.
+        pytest.param(
+            "r", {9: "C", 20: "C", 101: "C", 112: "C"}, (0, 4), id="bottom-clean"
+        ),
+        pytest.param(
+            "r", {9: "T", 20: "C", 101: "C", 112: "C"}, (1, 4), id="bottom-one-t"
+        ),
+        pytest.param(
+            "r", {9: "T", 20: "T", 101: "T", 112: "T"}, (4, 4), id="bottom-all-t"
+        ),
+    ],
+)
+def test_strand_check_counts_conversions_on_the_wrong_base(
+    reads, capsys, strand, bases, expected
+) -> None:
+    """Each CpG's never-converted base is examined; a conversion there counts."""
+    reads.read("read", 0, 154, strand=strand, bases=bases)
+    reads.extract(verbose=True)
+    assert strand_check_counts(capsys.readouterr().out) == expected
+
+
+def test_strand_check_needs_the_partner_base_to_be_covered(reads, capsys) -> None:
+    """A CpG cut by the end of a read has no partner base to check."""
+    reads.read("top_ends_on_c", 0, 10, bases={9: "C"})  # the G is past the read
+    reads.read("bottom_starts_on_g", 21, 60, strand="r", bases={21: "G"})  # no C
+    result = reads.extract(verbose=True)
+
+    assert rows_of(result) == [{0: 1}, {1: 1}]  # both CpGs are still called
+    assert strand_check_counts(capsys.readouterr().out) is None  # nothing checked
+
+
+def test_strand_check_counts_both_mates(reads, capsys) -> None:
+    """Every decoded read contributes, including both mates of a pair."""
+    reads.pair(
+        "frag",
+        left=(0, 110),
+        right=(95, 154),
+        left_bases={9: "C", 10: "A", 20: "C", 21: "G", 101: "C", 102: "G"},
+        right_bases={101: "C", 102: "A", 112: "C", 113: "G"},
+    )
+    reads.extract(verbose=True)
+    # Left mate: 3 CpGs checked, 1 contradiction. Right mate: 2 checked, 1.
+    assert strand_check_counts(capsys.readouterr().out) == (2, 5)
+
+
+def test_strand_check_does_not_apply_to_bismark_reads(
+    reads, capsys, monkeypatch
+) -> None:
+    """Bismark resolves the strand itself; its reads are not checked."""
+    monkeypatch.setattr(functions, "_STRAND_CHECK_MIN_CPGS", 1)
+    reads.read(
+        "bismark",
+        0,
+        154,
+        bases={10: "A", 21: "A", 102: "A", 113: "A"},
+        xm={9: "Z", 20: "Z", 101: "z", 112: "z"},
+        xg="CT",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = reads.extract(verbose=True)
+    assert rows_of(result) == [{0: 1, 1: 1, 2: 0, 3: 0}]
+    assert strand_check_counts(capsys.readouterr().out) is None
+
+
+def test_strand_warning_thresholds(reads, monkeypatch) -> None:
+    """The warning needs enough CpGs and a rate strictly above the limit."""
+    # 2 contradictions in 4 CpGs: 50%.
+    reads.read("read", 0, 154, bases={10: "A", 21: "A", 102: "G", 113: "G"})
+
+    # Too few CpGs checked to conclude anything (default minimum is 1,000).
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        reads.extract()
+
+    monkeypatch.setattr(functions, "_STRAND_CHECK_MIN_CPGS", 4)
+    with pytest.warns(RuntimeWarning) as recorded:
+        reads.extract()
+    assert len(recorded) == 1
+    message = str(recorded[0].message)
+    assert "2 of 4 CpGs (50.0%)" in message
+    assert "strand tag" in message
+    assert "non-directional" in message
+    assert "reads.bam" in message
+
+    # Exactly at the limit is not over it.
+    monkeypatch.setattr(functions, "_STRAND_CONTRADICTION_WARNING_RATE", 0.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        reads.extract()
+
+    # One more CpG than was checked: below the minimum again.
+    monkeypatch.setattr(functions, "_STRAND_CONTRADICTION_WARNING_RATE", 0.02)
+    monkeypatch.setattr(functions, "_STRAND_CHECK_MIN_CPGS", 5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        reads.extract()
+
+
+def test_default_strand_check_limits() -> None:
+    """The shipped limits: over 2% of at least 1,000 CpGs."""
+    assert functions._STRAND_CONTRADICTION_WARNING_RATE == 0.02
+    assert functions._STRAND_CHECK_MIN_CPGS == 1000

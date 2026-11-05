@@ -8,6 +8,7 @@ bottom-strand call and on which strand tag each mate carries.
 """
 
 import collections
+import warnings
 
 import numpy as np
 import pysam
@@ -20,6 +21,7 @@ from bam2tensor.metadata import read_npz_metadata
 from tests.paths import (
     SARSCOV2_BISMARK_BAM,
     SARSCOV2_BWAMETH_BAM,
+    SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM,
     SARSCOV2_CHROMOSOME,
     SARSCOV2_FASTA,
 )
@@ -326,3 +328,103 @@ def test_retained_cytosine_count_matches_the_reference_on_real_bwameth_output(
 
     assert reads == 1114
     assert with_retained > 500  # the comparison is not vacuous
+
+
+# ---------------------------------------------------------------------------
+# Strand-tag check on real output
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bam_path", ALIGNMENTS)
+def test_directional_pairs_pass_the_strand_check(
+    bam_path, sarscov2_embedding, capsys
+) -> None:
+    """Real, correctly tagged output raises no warning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        functions.extract_methylation_data_from_bam(
+            input_bam=bam_path,
+            genome_methylation_embedding=sarscov2_embedding,
+            verbose=True,
+        )
+    output = capsys.readouterr().out
+    if bam_path == SARSCOV2_BWAMETH_BAM:
+        # Decoded from bases, so checked: not one contradiction.
+        assert "Strand-tag check: 0 of 1,617 CpGs (0.000%)" in output
+    else:
+        # Bismark resolves the strand itself; its reads are not checked.
+        assert "Strand-tag check" not in output
+
+
+def test_bwameth_mistags_most_complementary_strand_pairs() -> None:
+    """What the non-directional fixture contains (guards the fixture itself).
+
+    Each read's true strand shows in its bases: C-to-T changes for the top
+    strand, G-to-A for the bottom strand. For most of these pairs bwa-meth's
+    YD tag says the opposite.
+    """
+    reference = "".join(
+        line.strip() for line in open(SARSCOV2_FASTA) if not line.startswith(">")
+    ).upper()
+    agree = disagree = 0
+    with pysam.AlignmentFile(SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM) as bam:
+        for read in bam.fetch():
+            sequence = str(read.query_sequence)
+            c_to_t = g_to_a = 0
+            for query, ref in read.get_aligned_pairs(matches_only=True):
+                c_to_t += reference[ref] == "C" and sequence[query] == "T"
+                g_to_a += reference[ref] == "G" and sequence[query] == "A"
+            if c_to_t == g_to_a:
+                continue  # no evidence either way
+            bases_say_bottom = g_to_a > c_to_t
+            if bases_say_bottom == (read.get_tag("YD") == "r"):
+                agree += 1
+            else:
+                disagree += 1
+
+    assert agree + disagree > 1200
+    assert disagree > 3 * agree
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_real_mistagged_pairs_trigger_the_strand_warning(
+    sarscov2_embedding, threads
+) -> None:
+    """bwa-meth's output for a non-directional library is flagged.
+
+    The pairs in this file are real bwa-meth alignments of
+    complementary-strand read pairs, tagged as bwa-meth tagged them.
+    """
+    with pytest.warns(RuntimeWarning) as recorded:
+        functions.extract_methylation_data_from_bam(
+            input_bam=SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM,
+            genome_methylation_embedding=sarscov2_embedding,
+            threads=threads,
+        )
+    assert len(recorded) == 1
+    message = str(recorded[0].message)
+    assert "245 of 1,542 CpGs (15.9%)" in message
+    assert "non-directional" in message
+    assert "bwa-meth" in message
+
+
+def test_cli_warns_about_real_mistagged_pairs(tmp_path) -> None:
+    """End to end: the warning appears in the CLI report for that BAM."""
+    result = CliRunner().invoke(
+        __main__.main,
+        [
+            "--input-path",
+            SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM,
+            "--reference-fasta",
+            SARSCOV2_FASTA,
+            "--genome-name",
+            "sarscov2",
+            "--expected-chromosomes",
+            SARSCOV2_CHROMOSOME,
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "WARNING: 245 of 1,542 CpGs (15.9%)" in result.output
+    assert "Errors" not in result.output

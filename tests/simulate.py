@@ -60,6 +60,12 @@ _P_LOW_MAPQ = 0.10
 _P_LOW_MAPQ_ONE_MATE = 0.05
 _P_SNV_AT_CPG = 0.03
 _P_MISCALL_AT_CPG = 0.03
+# Chance that the *other* base of a CpG — the one this strand never converts —
+# is misread as the other strand's conversion product (G read as A on the top
+# strand, C read as T on the bottom strand). It does not affect any call; it
+# gives correctly tagged reads the small rate of "contradictions" that real
+# sequencing errors and SNPs produce, for the strand-tag check to tolerate.
+_P_ERROR_AT_PARTNER_BASE = 0.005
 
 # A fragment is only simulated as non-converted if every one of its reads
 # would then retain at least this many non-CpG cytosines. That keeps each
@@ -95,6 +101,10 @@ class SimulatedRead:
             that is neither).
         retained_non_cpg: Number of unconverted non-CpG cytosines in the read
             (guanines, for the bottom strand). ``0`` unless ``non_converted``.
+        mistagged: True if the read was written with the wrong strand tag
+            (see ``mistagged_fraction``). Such a read is decoded on the wrong
+            base, so ``cpg_calls`` does not describe the extractor's output
+            for it.
     """
 
     name: str
@@ -110,6 +120,7 @@ class SimulatedRead:
     tlen: int
     cpg_calls: list[tuple[int, int]]
     retained_non_cpg: int
+    mistagged: bool = False
 
 
 @dataclass
@@ -227,6 +238,7 @@ def simulate_bam(
     strands: tuple[str, ...] = ("top", "bottom"),
     paired: bool = True,
     bismark_xg_tag: bool = True,
+    mistagged_fraction: float = 0.0,
 ) -> SimulatedDataset:
     """Simulate bisulfite reads and write them as an indexed BAM.
 
@@ -245,15 +257,22 @@ def simulate_bam(
             False write single-end reads: only read 1, unpaired.
         bismark_xg_tag: Bismark dialect only. If False, omit the ``XG``
             genome-strand tag, as a Bismark-style BAM from another tool might.
+        mistagged_fraction: Biscuit dialect only. Fraction of fragments whose
+            reads are written with the opposite ``YD`` strand tag, as bwa-meth
+            does to most complementary-strand pairs of a non-directional
+            library. The bases are unchanged; only the tag is wrong.
 
     Returns:
         The path of the BAM together with the truth for every read.
 
     Raises:
-        ValueError: If ``aligner`` or ``strands`` is not recognised.
+        ValueError: If ``aligner`` or ``strands`` is not recognised, or if
+            ``mistagged_fraction`` is used with the Bismark dialect.
     """
     if aligner not in ("biscuit", "bismark"):
         raise ValueError(f"Unknown aligner dialect: {aligner!r}")
+    if mistagged_fraction and aligner != "biscuit":
+        raise ValueError("mistagged_fraction applies to the biscuit dialect only")
     if not strands or any(strand not in ("top", "bottom") for strand in strands):
         raise ValueError(f"Invalid strands: {strands!r}")
 
@@ -293,6 +312,7 @@ def simulate_bam(
                 rng.randrange(2) if rng.random() < _P_LOW_MAPQ_ONE_MATE else None
             )
             duplicate = rng.random() < _P_DUPLICATE
+            mistagged = mistagged_fraction > 0 and rng.random() < mistagged_fraction
             non_converted = rng.random() < _P_NON_CONVERTED_FRAGMENT
             fully_unmethylated = rng.random() < _P_FULLY_UNMETHYLATED_FRAGMENT
 
@@ -370,6 +390,14 @@ def simulate_bam(
                         state = 1 if methylated[cpg] else 0
                     cpg_calls.append((cpg + 1, state))
 
+                    # Occasionally misread the CpG's other base (see
+                    # _P_ERROR_AT_PARTNER_BASE), where the read covers it.
+                    partner = cpg if bottom_strand else cpg + 1
+                    if start <= partner < end and (
+                        rng.random() < _P_ERROR_AT_PARTNER_BASE
+                    ):
+                        bases[partner - start] = "T" if bottom_strand else "A"
+
                 read = SimulatedRead(
                     name=f"{chrom}_fragment{fragment_index:04d}",
                     chrom=chrom,
@@ -390,6 +418,7 @@ def simulate_bam(
                     ),
                     cpg_calls=cpg_calls,
                     retained_non_cpg=retained_non_cpg,
+                    mistagged=mistagged,
                 )
                 mate_start = mate_starts[1 - mate_index]
                 records.append(((chrom_index, start), read, mate_start))
@@ -431,7 +460,8 @@ def simulate_bam(
             )
             segment.set_tag("MD", _md_tag(reference_span, read.sequence))
             if aligner == "biscuit":
-                segment.set_tag("YD", "r" if read.bottom_strand else "f")
+                tagged_bottom = read.bottom_strand != read.mistagged
+                segment.set_tag("YD", "r" if tagged_bottom else "f")
             else:
                 segment.set_tag(
                     "XM",

@@ -16,6 +16,7 @@ from bam2tensor.metadata import read_npz_metadata, read_npz_tlen
 from tests.paths import (
     SARSCOV2_BISMARK_BAM,
     SARSCOV2_BWAMETH_BAM,
+    SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM,
     TESTS_DIR,
     TEST_BAM,
     TEST_BAM_INDEX,
@@ -42,7 +43,12 @@ def test_get_input_bams() -> None:
     # A directory is searched recursively: the bundled fixtures in tests/
     # and tests/data/.
     assert sorted(__main__.get_input_bams(str(TESTS_DIR))) == sorted(
-        [TEST_BAM, SARSCOV2_BISMARK_BAM, SARSCOV2_BWAMETH_BAM]
+        [
+            TEST_BAM,
+            SARSCOV2_BISMARK_BAM,
+            SARSCOV2_BWAMETH_BAM,
+            SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM,
+        ]
     )
 
 

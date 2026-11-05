@@ -26,3 +26,8 @@ SARSCOV2_FASTA = str(SARSCOV2_DIR / "genome.fasta")
 SARSCOV2_CHROMOSOME = "MT192765.1"
 SARSCOV2_BISMARK_BAM = str(SARSCOV2_DIR / "bismark.bam")
 SARSCOV2_BWAMETH_BAM = str(SARSCOV2_DIR / "bwameth.bam")
+
+# 634 further read pairs that only bwa-meth aligned: complementary-strand pairs
+# of the (non-directional) library, most of which bwa-meth gives a strand tag
+# that contradicts their bases.
+SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM = str(SARSCOV2_DIR / "bwameth_nondirectional.bam")
