@@ -5,13 +5,14 @@ from bam2tensor import embedding
 from bam2tensor import functions
 from bam2tensor.functions import ExtractionResult, check_chromosome_overlap
 from bam2tensor.functions import detect_aligner
+from tests.paths import TEST_BAM, TEST_FASTA
 
 TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
     "test_genome",
     expected_chromosomes=["chr1", "chr2", "chr3"],
-    fasta_source="tests/test_fasta.fa",
+    fasta_source=TEST_FASTA,
     window_size=150,
-    skip_cache=False,
+    skip_cache=True,  # built at import time: must not write a cache file
     verbose=True,
 )
 
@@ -20,7 +21,7 @@ def test_extract_methylation_data_from_bam() -> None:
     """Test extract_methylation_data_from_bam."""
 
     result = functions.extract_methylation_data_from_bam(
-        input_bam="tests/test.bam",
+        input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
         verbose=True,
@@ -38,7 +39,7 @@ def test_extract_methylation_data_from_bam_debug() -> None:
     """Test extract_methylation_data_from_bam with debug flag set."""
 
     result = functions.extract_methylation_data_from_bam(
-        input_bam="tests/test.bam",
+        input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
         verbose=True,
@@ -501,8 +502,9 @@ def test_skip_flags_constant():
     """Verify _SKIP_FLAGS matches the expected BAM flag bits."""
     from bam2tensor.functions import _SKIP_FLAGS
 
-    assert _SKIP_FLAGS == 0x400 | 0x200 | 0x100 | 0x800
-    assert _SKIP_FLAGS == 0xF00
+    # duplicate | qcfail | secondary | supplementary | unmapped
+    assert _SKIP_FLAGS == 0x400 | 0x200 | 0x100 | 0x800 | 0x4
+    assert _SKIP_FLAGS == 0xF04
 
 
 # ======================================================================
@@ -782,7 +784,7 @@ def test_bismark_read_no_cpg_overlap(tmp_path):
 
 def test_detect_aligner_yd_tag():
     """detect_aligner identifies Biscuit/bwameth from the test BAM (has YD tag)."""
-    result = detect_aligner("tests/test.bam")
+    result = detect_aligner(TEST_BAM)
     assert "Biscuit" in result or "bwameth" in result
     assert "YD" in result
 
@@ -835,7 +837,7 @@ def test_extract_methylation_missing_index(tmp_path) -> None:
 
     # Copy a real BAM file but not its index
     bam_file = tmp_path / "no_index.bam"
-    shutil.copy("tests/test.bam", bam_file)
+    shutil.copy(TEST_BAM, bam_file)
     # Don't copy the .bai file
 
     with pytest.raises(FileNotFoundError, match="Index missing for bam file"):
@@ -1435,3 +1437,157 @@ def test_tlen_empty_for_no_reads(tmp_path):
     assert result.matrix.shape[0] == 0
     assert len(result.tlen) == 0
     assert result.tlen.dtype == np.int32
+
+
+# ======================================================================
+# Reads without a usable alignment
+# ======================================================================
+
+
+def _make_bam_from_segments(tmp_path, build_segments, seq_len=150):
+    """Helper: write an indexed single-contig BAM from hand-built segments.
+
+    ``build_segments`` receives the BAM header and returns the
+    ``pysam.AlignedSegment`` objects to write, in coordinate order. Uses the
+    same reference as ``_make_bam_with_reads`` (CpGs at 1-based 10, 20, 100,
+    110).
+    """
+    fasta_path = tmp_path / "ref.fa"
+    seq = "N" * 9 + "CG" + "N" * 9 + "CG" + "N" * 79 + "CG" + "N" * 9 + "CG" + "N" * 40
+    with open(fasta_path, "w") as f:
+        f.write(">chr1\n" + seq + "\n")
+    emb = embedding.GenomeMethylationEmbedding(
+        "test_segments",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(fasta_path),
+        skip_cache=True,
+    )
+
+    bam_path = tmp_path / "segments.bam"
+    header = pysam.AlignmentHeader.from_dict(
+        {"HD": {"VN": "1.0", "SO": "coordinate"}, "SQ": [{"LN": seq_len, "SN": "chr1"}]}
+    )
+    with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
+        for segment in build_segments(header):
+            out_bam.write(segment)
+    pysam.index(str(bam_path))
+    return emb, str(bam_path)
+
+
+def _mapped_segment(header, name, flag=0, mapq=60, seq_len=150):
+    """A full-length forward-parent (YD=f) read covering all four CpGs."""
+    a = pysam.AlignedSegment(header)
+    a.query_name = name
+    a.query_sequence = "N" * seq_len
+    a.flag = flag
+    a.reference_id = 0
+    a.reference_start = 0
+    a.mapping_quality = mapq
+    a.cigartuples = [(0, seq_len)]
+    a.set_tag("MD", str(seq_len))
+    a.set_tag("YD", "f")
+    return a
+
+
+def _unmapped_placed_mate(header, name, strand_tag=("YD", "f")):
+    """An unmapped read placed at its mapped mate's position.
+
+    This is how aligners emit a pair in which only one mate aligned: the
+    unmapped mate inherits the mate's reference and position (so a region
+    fetch returns it) but has flag 0x4, MAPQ 0 and no CIGAR.
+    """
+    a = pysam.AlignedSegment(header)
+    a.query_name = name
+    a.query_sequence = "N" * 50
+    a.flag = 0x1 | 0x4 | 0x40  # paired, unmapped, first in pair
+    a.reference_id = 0
+    a.reference_start = 0
+    a.mapping_quality = 0
+    a.next_reference_id = 0
+    a.next_reference_start = 0
+    if strand_tag is not None:
+        a.set_tag(*strand_tag)
+    return a
+
+
+@pytest.mark.parametrize(
+    "strand_tag",
+    [("YD", "f"), ("XB", "C"), ("XM", "." * 50), None],
+    ids=["biscuit-YD", "gem3-XB", "bismark-XM", "untagged"],
+)
+def test_unmapped_placed_mate_is_skipped(tmp_path, strand_tag):
+    """An unmapped mate placed at its partner's position is ignored, not fatal.
+
+    Regression: with ``quality_limit=0`` the MAPQ filter no longer hid these
+    reads, and their missing reference end crashed the CpG lookup with
+    ``TypeError: '<' not supported between instances of 'NoneType' and 'int'``.
+    """
+    emb, bam_path = _make_bam_from_segments(
+        tmp_path,
+        lambda header: [
+            _unmapped_placed_mate(header, "pair1", strand_tag),
+            _mapped_segment(header, "pair1", flag=0x1 | 0x8 | 0x80),
+        ],
+    )
+
+    for quality_limit in (0, 20):
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=bam_path,
+            genome_methylation_embedding=emb,
+            quality_limit=quality_limit,
+        )
+        # Only the mapped mate contributes a row.
+        assert result.matrix.shape[0] == 1
+        assert len(result.tlen) == 1
+
+
+def test_unmapped_placed_mate_is_skipped_in_parallel_path(tmp_path):
+    """The unmapped-read skip applies in worker processes too."""
+    emb, bam_path = _make_bam_from_segments(
+        tmp_path,
+        lambda header: [
+            _unmapped_placed_mate(header, "pair1"),
+            _mapped_segment(header, "pair1", flag=0x1 | 0x8 | 0x80),
+        ],
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path,
+        genome_methylation_embedding=emb,
+        quality_limit=0,
+        threads=2,
+    )
+    assert result.matrix.shape[0] == 1
+
+
+def test_mapped_read_without_cigar_is_skipped(tmp_path):
+    """A read flagged as mapped but with no CIGAR has no span to extract."""
+
+    def build(header):
+        no_cigar = pysam.AlignedSegment(header)
+        no_cigar.query_name = "no_cigar"
+        no_cigar.query_sequence = "N" * 50
+        no_cigar.flag = 0
+        no_cigar.reference_id = 0
+        no_cigar.reference_start = 0
+        no_cigar.mapping_quality = 60
+        no_cigar.set_tag("YD", "f")
+        return [no_cigar, _mapped_segment(header, "good")]
+
+    emb, bam_path = _make_bam_from_segments(tmp_path, build)
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb, quality_limit=0
+    )
+    assert result.matrix.shape[0] == 1
+
+
+def test_detect_aligner_ignores_unmapped_reads(tmp_path):
+    """Aligner detection samples only mapped reads."""
+    _, bam_path = _make_bam_from_segments(
+        tmp_path,
+        # The unmapped read carries a Bismark-style tag; the mapped one YD.
+        lambda header: [
+            _unmapped_placed_mate(header, "pair1", ("XM", "." * 50)),
+            _mapped_segment(header, "pair1", flag=0x1 | 0x8 | 0x80),
+        ],
+    )
+    assert detect_aligner(bam_path) == "Biscuit/bwameth (YD tag)"

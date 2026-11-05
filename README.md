@@ -169,6 +169,8 @@ bam2tensor \
 
 Each BAM file will generate a corresponding `.methylation.npz` file in the same location.
 
+If a BAM cannot be processed (for example its index is missing, or its chromosome names do not match the reference), bam2tensor reports the error, carries on with the remaining files, and lists the failures in the final summary. The exit status is `1` if any BAM failed and `0` otherwise, so schedulers and pipelines can detect a partial failure.
+
 ### Custom Output Directory
 
 Write output files to a specific directory instead of next to the input BAMs:
@@ -298,7 +300,7 @@ Bisulfite and EM-seq library preparation can produce two kinds of per-read conve
 Ports the logic of [nebiolabs/mark-nonconverted-reads](https://github.com/nebiolabs/mark-nonconverted-reads). A read is dropped if it carries at least `--non-converted-threshold` (default 3) retained non-CpG cytosines, a signature of incomplete bisulfite or EM-seq conversion.
 
 - **Bismark BAMs**: counted directly from the `XM` tag's uppercase `H`/`X`/`U` characters (retained cytosines in CHH/CHG/unknown contexts).
-- **Biscuit / bwameth / gem3 BAMs**: counted by comparing the read to the reference via the `MD` tag (using pysam's `get_aligned_pairs(with_seq=True)`). SNPs — where the read's retained `C` sits over a reference base that isn't `C` — are excluded from the count, matching NEB's reference-validation step. No separate FASTA reload is required.
+- **Biscuit / bwameth / gem3 BAMs**: counted by comparing the read to the reference via the `MD` tag (using pysam's `get_aligned_pairs(with_seq=True)`). SNPs — where the read's retained `C` sits over a reference base that isn't `C` — are excluded from the count, matching NEB's reference-validation step. No separate FASTA reload is required. Reads **without** an `MD` tag cannot be evaluated: they are kept, and bam2tensor prints a warning with the number of affected reads. If your aligner did not write `MD` tags, add them first with `samtools calmd`.
 
 ### `--filter-em-overconversion` — EM-seq fragment-level over-conversion
 

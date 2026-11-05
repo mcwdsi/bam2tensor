@@ -5,14 +5,15 @@ import pysam
 import pytest
 from bam2tensor import embedding
 from bam2tensor import functions
+from tests.paths import TEST_BAM, TEST_FASTA
 
 # Shared embedding for tests that hit the bundled multi-chromosome fixture.
 TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
     "test_genome",
     expected_chromosomes=["chr1", "chr2", "chr3"],
-    fasta_source="tests/test_fasta.fa",
+    fasta_source=TEST_FASTA,
     window_size=150,
-    skip_cache=False,
+    skip_cache=True,  # built at import time: must not write a cache file
 )
 
 
@@ -32,13 +33,13 @@ def _assert_results_equal(a, b):
 def test_threads_2_matches_threads_1_on_test_bam():
     """threads=2 produces bitwise-identical output to threads=1 on test.bam."""
     serial = functions.extract_methylation_data_from_bam(
-        input_bam="tests/test.bam",
+        input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
         threads=1,
     )
     parallel = functions.extract_methylation_data_from_bam(
-        input_bam="tests/test.bam",
+        input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
         threads=2,
@@ -49,13 +50,13 @@ def test_threads_2_matches_threads_1_on_test_bam():
 def test_threads_4_matches_threads_1_on_test_bam():
     """threads=4 (more workers than chromosomes is fine) matches threads=1."""
     serial = functions.extract_methylation_data_from_bam(
-        input_bam="tests/test.bam",
+        input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
         threads=1,
     )
     parallel = functions.extract_methylation_data_from_bam(
-        input_bam="tests/test.bam",
+        input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
         threads=4,
@@ -67,7 +68,7 @@ def test_threads_invalid_value():
     """threads=0 raises ValueError before any work happens."""
     with pytest.raises(ValueError, match="threads must be >= 1"):
         functions.extract_methylation_data_from_bam(
-            input_bam="tests/test.bam",
+            input_bam=TEST_BAM,
             genome_methylation_embedding=TEST_EMBEDDING,
             threads=0,
         )

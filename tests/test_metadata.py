@@ -14,13 +14,14 @@ from bam2tensor.metadata import (
     write_npz_metadata,
     write_npz_tlen,
 )
+from tests.paths import TEST_BAM, TEST_BAM_INDEX, TEST_FASTA
 
 TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
     "test_genome",
     expected_chromosomes=["chr1", "chr2", "chr3"],
-    fasta_source="tests/test_fasta.fa",
+    fasta_source=TEST_FASTA,
     window_size=150,
-    skip_cache=False,
+    skip_cache=True,  # built at import time: must not write a cache file
     verbose=False,
 )
 
@@ -47,7 +48,7 @@ def test_cpg_index_crc32_differs_for_different_embeddings(tmp_path) -> None:
     emb_subset = embedding.GenomeMethylationEmbedding(
         "test_subset",
         expected_chromosomes=["chr1"],
-        fasta_source="tests/test_fasta.fa",
+        fasta_source=TEST_FASTA,
         window_size=150,
         skip_cache=True,
         verbose=False,
@@ -129,8 +130,8 @@ def test_main_writes_metadata(tmp_path) -> None:
     from click.testing import CliRunner
     from bam2tensor import __main__
 
-    shutil.copy("tests/test.bam", tmp_path / "test.bam")
-    shutil.copy("tests/test.bam.bai", tmp_path / "test.bam.bai")
+    shutil.copy(TEST_BAM, tmp_path / "test.bam")
+    shutil.copy(TEST_BAM_INDEX, tmp_path / "test.bam.bai")
 
     runner = CliRunner()
     result = runner.invoke(
@@ -139,7 +140,7 @@ def test_main_writes_metadata(tmp_path) -> None:
             "--input-path",
             str(tmp_path / "test.bam"),
             "--reference-fasta",
-            "tests/test_fasta.fa",
+            TEST_FASTA,
             "--genome-name",
             "test",
             "--expected-chromosomes",
