@@ -65,23 +65,49 @@ class Reads:
         tlen=0,
         chrom="chr1",
         cigar=None,
+        qualities=None,
     ):
         """Add one read covering reference [start, end).
 
-        ``bases`` maps 0-based reference positions to read bases (everything
-        else is N). ``xm`` likewise maps reference positions to Bismark call
-        letters, turning the read into a Bismark-style one; otherwise it
-        carries a ``YD`` tag with the given ``strand``. Positions are
-        reference positions, so with a custom ``cigar`` they refer to an
-        ungapped layout of the query starting at ``start``.
+        ``bases`` maps 0-based reference positions to read bases. ``xm``
+        likewise maps reference positions to Bismark call letters, turning
+        the read into a Bismark-style one; otherwise it carries a ``YD`` tag
+        with the given ``strand``. Positions are reference positions, so
+        with a custom ``cigar`` they refer to an ungapped layout of the query
+        starting at ``start``.
+
+        Bases not given are N, with one exception: the *other* base of each
+        CpG (the G for a top-strand read, the C for a bottom-strand read),
+        which reads as the reference has it, so that the read shows an
+        intact CpG wherever a test gives it a call. ``qualities`` maps
+        reference positions to Phred base qualities (40 elsewhere).
         """
         length = end - start
         sequence = ["N"] * length
+        if xm is None:
+            bottom_strand = strand == "r"
+        elif xg is not None:
+            bottom_strand = xg == "GA"
+        else:
+            # As the extractor infers it: from the bases the calls sit on.
+            bottom_strand = any(
+                (bases or {}).get(position) in ("G", "A") for position in xm
+            )
+        for c, g in zip(CPG_C, CPG_G):
+            other = c if bottom_strand else g
+            if start <= other < end:
+                sequence[other - start] = REFERENCE[other]
         for position, base in (bases or {}).items():
             sequence[position - start] = base
         segment = pysam.AlignedSegment(self.header)
         segment.query_name = name
         segment.query_sequence = "".join(sequence)
+        base_qualities = [40] * length
+        for position, quality in (qualities or {}).items():
+            base_qualities[position - start] = quality
+        segment.query_qualities = pysam.qualitystring_to_array(
+            "".join(chr(quality + 33) for quality in base_qualities)
+        )
         segment.flag = flag
         segment.reference_id = self.chromosomes.index(chrom)
         segment.reference_start = start
@@ -401,7 +427,11 @@ def test_mate_missing_from_the_bam_at_end_of_chromosome(reads) -> None:
 
 
 def test_mates_on_different_chromosomes_are_separate_fragments(tmp_path) -> None:
-    """A mate mapped to another chromosome is not combined."""
+    """A mate mapped to another chromosome is not combined.
+
+    Such a pair is never a proper pair, so it is only seen at all when
+    improper pairs are kept.
+    """
     reads = Reads(tmp_path, chromosomes=("chr1", "chr2"))
     reads.read(
         "split",
@@ -422,12 +452,15 @@ def test_mates_on_different_chromosomes_are_separate_fragments(tmp_path) -> None
         mate_chrom="chr1",
         chrom="chr2",
     )
-    result = reads.extract()
+    assert rows_of(reads.extract()) == []
 
+    result = reads.extract(keep_improper_pairs=True)
     # chr2's CpGs are columns 4-7.
     assert rows_of(result) == [{0: 1, 1: 1}, {6: 0, 7: 0}]
     for threads in (2,):
-        assert rows_of(reads.extract(threads=threads)) == rows_of(result)
+        assert rows_of(
+            reads.extract(keep_improper_pairs=True, threads=threads)
+        ) == rows_of(result)
 
 
 def test_mates_too_far_apart_are_separate_fragments(reads, monkeypatch) -> None:
@@ -856,16 +889,59 @@ def test_em_filter_sees_the_merged_fragment(reads) -> None:
 
 
 def test_em_filter_does_not_count_a_disagreement_as_unmethylated(reads) -> None:
-    """A CpG the mates disagree on is no data, which keeps the fragment."""
+    """A CpG the mates disagree on is no data: it is not an unmethylated call.
+
+    Two unmethylated calls and a disagreement are not the three unmethylated
+    calls the filter asks for.
+    """
     reads.pair(
         "disagree",
         left=(0, 110),
-        right=(95, 154),
+        right=(95, 110),
         left_bases={9: "T", 20: "T", 101: "T"},
-        right_bases={101: "C", 112: "T"},
+        right_bases={101: "C"},
     )
     result = reads.extract(filter_em_overconversion=True, em_overconversion_min_cpgs=3)
-    assert rows_of(result) == [{0: 0, 1: 0, 2: -1, 3: 0}]
+    assert rows_of(result) == [{0: 0, 1: 0, 2: -1}]
+
+
+def test_em_filter_ignores_cpgs_without_a_call(reads) -> None:
+    """A CpG with no usable call neither counts towards the minimum nor shields.
+
+    Otherwise one low-quality base would protect an otherwise fully
+    unmethylated fragment from the filter.
+    """
+    # Three unmethylated calls and one CpG on a low-quality base.
+    reads.read(
+        "three_calls",
+        0,
+        154,
+        bases={9: "T", 20: "T", 101: "T", 112: "T"},
+        qualities={101: 5},
+    )
+    # Two unmethylated calls and two CpGs without a call: too few calls.
+    reads.read(
+        "two_calls",
+        1,
+        154,
+        bases={9: "T", 20: "T", 101: "T", 112: "T"},
+        qualities={101: 5, 112: 5},
+    )
+    # Three unmethylated calls and a methylated one: not over-converted.
+    reads.read("mixed", 2, 154, bases={9: "T", 20: "T", 101: "T", 112: "C"})
+
+    assert rows_of(reads.extract()) == [
+        {0: 0, 1: 0, 2: -1, 3: 0},
+        {0: 0, 1: 0, 2: -1, 3: -1},
+        {0: 0, 1: 0, 2: 0, 3: 1},
+    ]
+    filtered = reads.extract(
+        filter_em_overconversion=True, em_overconversion_min_cpgs=3
+    )
+    assert rows_of(filtered) == [
+        {0: 0, 1: 0, 2: -1, 3: -1},
+        {0: 0, 1: 0, 2: 0, 3: 1},
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1072,7 +1148,11 @@ def test_strand_check_counts_both_mates(reads, capsys) -> None:
 def test_strand_check_does_not_apply_to_bismark_reads(
     reads, capsys, monkeypatch
 ) -> None:
-    """Bismark resolves the strand itself; its reads are not checked."""
+    """Bismark resolves the strand itself; its reads are not checked.
+
+    The calls are still discarded, as for any aligner: with an A where the G
+    of the CpG should be, the read shows no CpG.
+    """
     monkeypatch.setattr(functions, "_STRAND_CHECK_MIN_CPGS", 1)
     reads.read(
         "bismark",
@@ -1085,7 +1165,7 @@ def test_strand_check_does_not_apply_to_bismark_reads(
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         result = reads.extract(verbose=True)
-    assert rows_of(result) == [{0: 1, 1: 1, 2: 0, 3: 0}]
+    assert rows_of(result) == [{0: -1, 1: -1, 2: -1, 3: -1}]
     assert strand_check_counts(capsys.readouterr().out) is None
 
 
@@ -1127,3 +1207,851 @@ def test_default_strand_check_limits() -> None:
     """The shipped limits: over 2% of at least 1,000 CpGs."""
     assert functions._STRAND_CONTRADICTION_WARNING_RATE == 0.02
     assert functions._STRAND_CHECK_MIN_CPGS == 1000
+
+
+# ---------------------------------------------------------------------------
+# A call needs an intact CpG
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "strand, bases, expected",
+    [
+        # Top strand: the call is on the C (9, 20); the G (10, 21) must read G.
+        pytest.param(
+            "f", {9: "T", 10: "G", 20: "C", 21: "G"}, {0: 0, 1: 1}, id="top-intact"
+        ),
+        pytest.param(
+            "f", {9: "T", 10: "A", 20: "C", 21: "G"}, {0: -1, 1: 1}, id="top-g-is-a"
+        ),
+        pytest.param(
+            "f", {9: "T", 10: "T", 20: "C", 21: "C"}, {0: -1, 1: -1}, id="top-g-is-c-t"
+        ),
+        pytest.param(
+            "f", {9: "T", 10: "N", 20: "C", 21: "G"}, {0: -1, 1: 1}, id="top-g-is-n"
+        ),
+        # Bottom strand: the call is on the G; the C (9, 20) must read C.
+        pytest.param(
+            "r", {9: "C", 10: "A", 20: "C", 21: "G"}, {0: 0, 1: 1}, id="bottom-intact"
+        ),
+        pytest.param(
+            "r", {9: "T", 10: "A", 20: "C", 21: "G"}, {0: -1, 1: 1}, id="bottom-c-is-t"
+        ),
+        pytest.param(
+            "r",
+            {9: "A", 10: "A", 20: "G", 21: "G"},
+            {0: -1, 1: -1},
+            id="bottom-c-is-a-g",
+        ),
+    ],
+)
+def test_call_requires_the_other_base_of_the_cpg(
+    reads, strand, bases, expected
+) -> None:
+    """A call is kept only if the read shows a CpG, not just a C (or G).
+
+    A molecule on which the CpG has mutated to CpA has no CpG to be
+    methylated. Its lone C is converted like any other non-CpG cytosine, so
+    a top-strand read shows T there — an "unmethylated CpG" unless the A
+    that follows is noticed. The same goes, mirrored, for a bottom-strand
+    read of a TpG molecule.
+    """
+    reads.read("read", 0, 60, strand=strand, bases=bases)
+    assert rows_of(reads.extract()) == [expected]
+
+
+@pytest.mark.parametrize(
+    "strand, deleted_position, bases",
+    [
+        # Top strand: the second CpG's G (21) is deleted; its C reads T.
+        pytest.param("f", 21, {9: "C", 10: "G", 20: "T"}, id="top-strand-g-deleted"),
+        # Bottom strand: the second CpG's C (20) is deleted; its G (query
+        # position 20 once the C is gone) reads A.
+        pytest.param("r", 20, {9: "C", 10: "G", 20: "A"}, id="bottom-strand-c-deleted"),
+    ],
+)
+def test_deleted_other_base_is_no_data(reads, strand, deleted_position, bases) -> None:
+    """A CpG whose other base is deleted from the read is not a CpG there."""
+    before = deleted_position
+    after = 60 - deleted_position - 1
+    segment = reads.read(
+        "deletion",
+        0,
+        before + after,
+        strand=strand,
+        cigar=[(0, before), (2, 1), (0, after)],
+    )
+    sequence = ["N"] * (before + after)
+    for position, base in bases.items():  # query positions
+        sequence[position] = base
+    segment.query_sequence = "".join(sequence)
+    segment.cigartuples = [(0, before), (2, 1), (0, after)]
+    assert segment.reference_end == 60
+
+    assert rows_of(reads.extract()) == [{0: 1, 1: -1}]
+
+
+@pytest.mark.parametrize("strand", ["f", "r"])
+def test_base_inserted_inside_a_cpg_is_no_data(reads, strand) -> None:
+    """C and G both present, but with a base between them: no CpG."""
+    # 21 reference bases (0-20), one inserted base, then reference 21-59:
+    # the second CpG's C is query position 20 and its G query position 22.
+    cigar = [(0, 21), (1, 1), (0, 39)]
+    segment = reads.read("insertion", 0, 61, strand=strand, cigar=cigar)
+    sequence = ["N"] * 61
+    for position, base in {9: "C", 10: "G", 20: "C", 21: "A", 22: "G"}.items():
+        sequence[position] = base
+    segment.query_sequence = "".join(sequence)
+    segment.cigartuples = cigar
+    assert segment.reference_end == 60
+
+    assert rows_of(reads.extract()) == [{0: 1, 1: -1}]
+
+
+def test_bismark_call_requires_an_intact_cpg_too(reads) -> None:
+    """Bismark takes CpG context from the reference; the read must agree.
+
+    The rule is applied from the read's bases for every aligner, which is
+    what keeps Bismark and bwa-meth output identical for the same reads.
+    """
+    reads.read(
+        "top",
+        0,
+        60,
+        bases={9: "T", 10: "A", 20: "C", 21: "G"},
+        xm={9: "z", 20: "Z"},
+        xg="CT",
+    )
+    reads.read(
+        "bottom",
+        1,
+        60,
+        bases={9: "T", 10: "A", 20: "C", 21: "G"},
+        xm={10: "z", 21: "Z"},
+        xg="GA",
+    )
+    assert rows_of(reads.extract()) == [{0: -1, 1: 1}, {0: -1, 1: 1}]
+
+
+def test_bismark_read_without_bases_is_decoded_from_its_call_string(reads) -> None:
+    """A Bismark read stored without SEQ still yields its XM calls."""
+    segment = reads.read("no_seq", 0, 60, xm={9: "Z", 20: "z"}, xg="CT")
+    xm_tag = segment.get_tag("XM")
+    segment.query_sequence = None
+    segment.cigartuples = [(0, 60)]
+    segment.set_tag("XM", xm_tag)
+    assert segment.query_sequence is None
+
+    assert rows_of(reads.extract()) == [{0: 1, 1: 0}]
+
+
+# ---------------------------------------------------------------------------
+# Base quality
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("quality, expected", [(0, -1), (19, -1), (20, 1), (40, 1)])
+def test_call_on_a_low_quality_base_is_no_data(reads, quality, expected) -> None:
+    """A call needs a base quality of at least 20 by default."""
+    reads.read("read", 0, 60, bases={9: "C", 20: "T"}, qualities={9: quality})
+    assert rows_of(reads.extract()) == [{0: expected, 1: 0}]
+
+
+def test_min_base_quality_is_adjustable(reads) -> None:
+    """A higher limit discards more calls; 0 turns the filter off."""
+    reads.read("read", 0, 60, bases={9: "C", 20: "T"}, qualities={9: 25, 20: 10})
+    assert rows_of(reads.extract()) == [{0: 1, 1: -1}]
+    assert rows_of(reads.extract(min_base_quality=30)) == [{0: -1, 1: -1}]
+    assert rows_of(reads.extract(min_base_quality=0)) == [{0: 1, 1: 0}]
+
+
+def test_quality_of_the_other_base_does_not_discard_a_call(reads) -> None:
+    """Only the base that carries the call needs the quality."""
+    reads.read("read", 0, 60, bases={9: "C", 20: "T"}, qualities={10: 2, 21: 2})
+    assert rows_of(reads.extract()) == [{0: 1, 1: 0}]
+
+
+def test_reads_without_base_qualities_are_not_filtered(reads) -> None:
+    """A BAM that stores no qualities cannot be filtered on them."""
+    segment = reads.read("read", 0, 60, bases={9: "C", 20: "T"})
+    segment.query_qualities = None
+    assert rows_of(reads.extract()) == [{0: 1, 1: 0}]
+
+
+def test_bismark_calls_are_filtered_by_base_quality(reads) -> None:
+    """The base-quality rule applies to calls read from the XM string too."""
+    reads.read("bismark", 0, 60, xm={9: "Z", 20: "z"}, xg="CT", qualities={20: 3})
+    assert rows_of(reads.extract()) == [{0: 1, 1: -1}]
+    assert rows_of(reads.extract(min_base_quality=0)) == [{0: 1, 1: 0}]
+
+
+def test_mate_supplies_the_call_where_the_other_mate_has_none(reads) -> None:
+    """A low-quality base in one mate leaves the other mate's call standing.
+
+    Both mates cover the third CpG. The left mate reads C on a low-quality
+    base, the right mate T on a good one: with the filter the fragment's
+    call is the right mate's; without it the two disagree.
+    """
+    reads.pair(
+        "frag",
+        left=(0, 110),
+        right=(95, 154),
+        left_bases={9: "C", 20: "T", 101: "C"},
+        right_bases={101: "T", 112: "C"},
+        left_kwargs={"qualities": {101: 5}},
+    )
+    assert rows_of(reads.extract()) == [{0: 1, 1: 0, 2: 0, 3: 1}]
+    assert rows_of(reads.extract(min_base_quality=0)) == [{0: 1, 1: 0, 2: -1, 3: 1}]
+
+
+def test_low_quality_other_base_is_not_strand_checked(reads, capsys) -> None:
+    """A base below the quality limit is no evidence about the strand tag."""
+    reads.read(
+        "read",
+        0,
+        154,
+        bases={10: "A", 21: "A", 102: "G", 113: "G"},
+        qualities={10: 5},
+    )
+    reads.extract(verbose=True)
+    assert strand_check_counts(capsys.readouterr().out) == (1, 3)
+    reads.extract(verbose=True, min_base_quality=0)
+    assert strand_check_counts(capsys.readouterr().out) == (2, 4)
+
+
+# ---------------------------------------------------------------------------
+# Masking the 3' end of the fragment
+# ---------------------------------------------------------------------------
+
+ALL_METHYLATED = {0: 1, 1: 1, 2: 1, 3: 1}
+
+
+@pytest.mark.parametrize(
+    "mask, masked_columns",
+    [
+        (0, []),
+        # The fragment spans [0, 154). The C of the last CpG is at 112: 41
+        # bases from the last base of the fragment.
+        (41, []),
+        (42, [3]),
+        (52, [3]),
+        (53, [2, 3]),
+        (154, [0, 1, 2, 3]),
+    ],
+)
+def test_3prime_mask_of_a_top_strand_fragment(reads, mask, masked_columns) -> None:
+    """The top strand's 3' end is the right-hand end of the fragment.
+
+    The distance is measured from the end of the fragment, not of each read:
+    the left mate ends at 110, nine bases past the third CpG, yet that CpG is
+    only masked once the mask reaches it from the fragment's end at 154. The
+    two mates agree on what is masked, so a masked CpG they both cover (the
+    third) stays masked.
+    """
+    reads.pair(
+        "frag",
+        left=(0, 110),
+        right=(95, 154),
+        left_bases={9: "C", 20: "C", 101: "C"},
+        right_bases={101: "C", 112: "C"},
+    )
+    expected = {**ALL_METHYLATED, **{column: -1 for column in masked_columns}}
+    result = reads.extract(mask_3prime=mask)
+    assert rows_of(result) == [expected]
+    # Counted per fragment: the third CpG, covered by both mates, counts once.
+    assert result.stats["cpg_masked_3prime"] == len(masked_columns)
+
+
+@pytest.mark.parametrize(
+    "mask, masked_columns",
+    [
+        (0, []),
+        # The G of the first CpG is at 10: ten bases from the fragment start.
+        (10, []),
+        (11, [0]),
+        (21, [0]),
+        (22, [0, 1]),
+        (154, [0, 1, 2, 3]),
+    ],
+)
+def test_3prime_mask_of_a_bottom_strand_fragment(reads, mask, masked_columns) -> None:
+    """The bottom strand's 3' end is the left-hand end of the fragment.
+
+    The right mate starts at 5 but belongs to a fragment starting at 0, which
+    is where the distance is measured from.
+    """
+    reads.pair(
+        "frag",
+        left=(0, 60),
+        right=(5, 154),
+        strand="r",
+        left_bases={10: "G", 21: "G"},
+        right_bases={10: "G", 21: "G", 102: "G", 113: "G"},
+    )
+    expected = {**ALL_METHYLATED, **{column: -1 for column in masked_columns}}
+    assert rows_of(reads.extract(mask_3prime=mask)) == [expected]
+
+
+def test_3prime_mask_of_single_end_reads_uses_the_read_end(reads) -> None:
+    """Without a mate, the read's own end is the only fragment end known."""
+    # Top strand, ends at 110: the C at 101 is 8 bases from the last base.
+    reads.read("top", 0, 110, bases={9: "C", 20: "C", 101: "C"})
+    # Bottom strand, starts at 5: the G at 10 is 5 bases from the start.
+    reads.read(
+        "bottom",
+        5,
+        154,
+        flag=REVERSE,
+        strand="r",
+        bases={10: "G", 21: "G", 102: "G", 113: "G"},
+    )
+    top = {0: 1, 1: 1, 2: 1}
+    assert rows_of(reads.extract(mask_3prime=5)) == [top, ALL_METHYLATED]
+    assert rows_of(reads.extract(mask_3prime=6)) == [
+        top,
+        {**ALL_METHYLATED, 0: -1},
+    ]
+    assert rows_of(reads.extract(mask_3prime=9)) == [
+        {**top, 2: -1},
+        {**ALL_METHYLATED, 0: -1},
+    ]
+
+
+def test_3prime_mask_applies_to_bismark_reads(reads) -> None:
+    """Masking works from positions, so it is the same for every aligner."""
+    reads.read("top", 0, 154, xm={9: "Z", 20: "Z", 101: "Z", 112: "Z"}, xg="CT")
+    reads.read("bottom", 0, 154, xm={10: "Z", 21: "Z", 102: "Z", 113: "Z"}, xg="GA")
+    assert rows_of(reads.extract(mask_3prime=42)) == [
+        {**ALL_METHYLATED, 3: -1},
+        {**ALL_METHYLATED, 0: -1, 1: -1},
+    ]
+
+
+def test_3prime_mask_does_not_drop_the_row(reads) -> None:
+    """A fragment whose calls are all masked is still a row: it covers the CpGs."""
+    reads.read("read", 0, 60, bases={9: "C", 20: "T"})
+    result = reads.extract(mask_3prime=60)
+    assert rows_of(result) == [{0: -1, 1: -1}]
+
+
+# ---------------------------------------------------------------------------
+# Proper pairs
+# ---------------------------------------------------------------------------
+
+
+def test_improper_pairs_are_dropped_unless_kept(reads) -> None:
+    """Paired reads not flagged as a proper pair are skipped by default.
+
+    Single-end reads have no pair to be proper, and are always kept.
+    """
+    reads.pair(
+        "proper",
+        left=(0, 60),
+        right=(94, 154),
+        left_bases={9: "C", 20: "C"},
+        right_bases={101: "C", 112: "C"},
+    )
+    reads.pair(
+        "improper",
+        left=(1, 60),
+        right=(94, 153),
+        left_bases={9: "T", 20: "T"},
+        right_bases={101: "T", 112: "T"},
+        left_kwargs={"flag": PAIRED | MATE_REVERSE | READ1},
+        right_kwargs={"flag": PAIRED | REVERSE | READ2},
+    )
+    reads.read("single", 2, 60, bases={9: "C", 20: "T"})
+
+    default = reads.extract()
+    assert rows_of(default) == [ALL_METHYLATED, {0: 1, 1: 0}]
+    assert default.stats["reads_dropped_improper_pair"] == 2
+
+    kept = reads.extract(keep_improper_pairs=True)
+    assert rows_of(kept) == [ALL_METHYLATED, {0: 0, 1: 0, 2: 0, 3: 0}, {0: 1, 1: 0}]
+    assert kept.stats["reads_dropped_improper_pair"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Mates are matched by position as well as by name
+# ---------------------------------------------------------------------------
+
+
+def test_pairs_sharing_a_name_are_matched_by_position(reads) -> None:
+    """Two pairs with one name: each read 2 joins the read 1 that points to it.
+
+    Regression: mates were matched on the name alone, so the second pair's
+    read 2 was merged into the first pair's row.
+    """
+    reads.pair(
+        "same",
+        left=(0, 60),
+        right=(94, 154),
+        left_bases={9: "C", 20: "C"},
+        right_bases={101: "C", 112: "C"},
+    )
+    reads.pair(
+        "same",
+        left=(1, 60),
+        right=(93, 153),
+        left_bases={9: "T", 20: "T"},
+        right_bases={101: "T", 112: "T"},
+    )
+    result = reads.extract()
+    assert rows_of(result) == [ALL_METHYLATED, {0: 0, 1: 0, 2: 0, 3: 0}]
+    assert result.tlen.tolist() == [154, 152]
+    assert rows_of(reads.extract(threads=2)) == rows_of(result)
+
+
+def test_mate_must_be_where_the_first_mate_says(reads) -> None:
+    """A read 2 the read 1 does not point to starts a fragment of its own."""
+    reads.read(
+        "frag",
+        0,
+        60,
+        flag=PAIRED | PROPER | MATE_REVERSE | READ1,
+        bases={9: "C", 20: "C"},
+        mate_start=94,
+        tlen=154,
+    )
+    reads.read(
+        "frag",
+        90,
+        154,
+        flag=PAIRED | PROPER | REVERSE | READ2,
+        bases={101: "T", 112: "T"},
+        mate_start=0,
+        tlen=-154,
+    )
+    assert rows_of(reads.extract()) == [{0: 1, 1: 1}, {2: 0, 3: 0}]
+
+
+# ---------------------------------------------------------------------------
+# Extraction statistics and the reference check
+# ---------------------------------------------------------------------------
+
+
+def test_extraction_stats_count_what_was_discarded(reads) -> None:
+    """Every discarded read and call is counted, by reason."""
+    reads.pair(
+        "pair",
+        left=(0, 60),
+        right=(94, 154),
+        # Second CpG: T where its G should be (a mismatch, not a conversion).
+        left_bases={9: "C", 20: "T", 21: "T"},
+        # Third CpG on a low-quality base; the fourth is in the masked end.
+        right_bases={101: "C", 112: "C"},
+        right_kwargs={"qualities": {101: 3}},
+    )
+    # First CpG: A where its G should be (the other strand's conversion).
+    reads.read("single", 0, 154, bases={9: "C", 10: "A", 20: "C", 101: "C", 112: "C"})
+    reads.pair(
+        "improper",
+        left=(0, 60),
+        right=(94, 154),
+        left_kwargs={"flag": PAIRED | MATE_REVERSE | READ1},
+        right_kwargs={"flag": PAIRED | REVERSE | READ2},
+    )
+
+    result = reads.extract(mask_3prime=42)
+
+    assert rows_of(result) == [
+        {0: 1, 1: -1, 2: -1, 3: -1},
+        {0: -1, 1: 1, 2: 1, 3: -1},
+    ]
+    assert result.stats == {
+        "reads_used": 3,
+        "reads_dropped_improper_pair": 2,
+        "reads_without_md": 0,
+        "fragments_from_two_mates": 1,
+        "cpg_observations": 8,
+        "cpg_not_intact": 2,
+        "cpg_reference_mismatch": 1,
+        "cpg_low_base_quality": 1,
+        "cpg_masked_3prime": 2,
+        "strand_checks": 8,
+        "strand_contradictions": 1,
+    }
+    assert reads.extract(mask_3prime=42, threads=2).stats == result.stats
+
+
+def test_reference_mismatch_warning(reads, monkeypatch) -> None:
+    """Reads that show no CpG where the reference has one: the wrong reference."""
+    # Three of four CpGs do not match: A and G where a C or T is due, and a
+    # T where the third CpG's G should be.
+    reads.read("read", 0, 154, bases={9: "A", 20: "G", 101: "C", 102: "T", 112: "C"})
+
+    # Too few CpGs to conclude anything (the default minimum is 1,000).
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = reads.extract()
+    assert rows_of(result) == [{0: -1, 1: -1, 2: -1, 3: 1}]
+    assert result.stats["cpg_reference_mismatch"] == 3
+
+    monkeypatch.setattr(functions, "_REFERENCE_MISMATCH_MIN_CPGS", 4)
+    with pytest.warns(RuntimeWarning) as recorded:
+        reads.extract()
+    assert len(recorded) == 1
+    message = str(recorded[0].message)
+    assert "3 of 4 CpGs (75.0%)" in message
+    assert "not aligned to the reference FASTA" in message
+    assert "reads.bam" in message
+
+    # Exactly at the limit is not over it.
+    monkeypatch.setattr(functions, "_REFERENCE_MISMATCH_WARNING_RATE", 0.75)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        reads.extract()
+
+
+def test_wrong_strand_tags_do_not_look_like_a_wrong_reference(
+    reads, monkeypatch
+) -> None:
+    """The other strand's conversion product is the strand check's business."""
+    monkeypatch.setattr(functions, "_REFERENCE_MISMATCH_MIN_CPGS", 4)
+    monkeypatch.setattr(functions, "_STRAND_CHECK_MIN_CPGS", 4)
+    reads.read(
+        "read",
+        0,
+        154,
+        bases={
+            9: "C",
+            10: "A",
+            20: "C",
+            21: "A",
+            101: "C",
+            102: "A",
+            112: "C",
+            113: "A",
+        },
+    )
+    with pytest.warns(RuntimeWarning) as recorded:
+        result = reads.extract()
+
+    assert len(recorded) == 1
+    assert "strand tag" in str(recorded[0].message)
+    assert rows_of(result) == [{0: -1, 1: -1, 2: -1, 3: -1}]
+    assert result.stats["cpg_not_intact"] == 4
+    assert result.stats["cpg_reference_mismatch"] == 0
+
+
+def test_default_reference_check_limits() -> None:
+    """The shipped limits: over 10% of at least 1,000 CpGs."""
+    assert functions._REFERENCE_MISMATCH_WARNING_RATE == 0.10
+    assert functions._REFERENCE_MISMATCH_MIN_CPGS == 1000
+
+
+@pytest.mark.parametrize("option", ["min_base_quality", "mask_3prime"])
+def test_negative_option_values_are_rejected(reads, option) -> None:
+    """Neither a quality limit nor a mask length can be negative."""
+    reads.read("read", 0, 60, bases={9: "C"})
+    with pytest.raises(ValueError, match=f"{option} must be >= 0"):
+        reads.extract(**{option: -1})
+
+
+# ---------------------------------------------------------------------------
+# 3' end mask: where the fragment ends
+# ---------------------------------------------------------------------------
+
+TLEN_CONVENTIONS = pytest.mark.parametrize(
+    "outer_span",
+    [False, True],
+    ids=["tlen-between-5prime-ends", "tlen-outer-span"],
+)
+
+
+@TLEN_CONVENTIONS
+def test_3prime_mask_of_top_strand_mates_extending_past_each_other(
+    reads, outer_span
+) -> None:
+    """The fragment ends where its reverse-aligned mate does, whatever TLEN says.
+
+    Forward mate [40, 140), reverse mate [10, 110). bwa reports the distance
+    between the mates' starting ends (110 - 40 = 70) as the template length,
+    Bismark the outer span of the two alignments (140 - 10 = 130). The top
+    strand's 3' end is at 110 either way: the C at 112, which only the
+    forward mate reaches, lies beyond it, and the C at 101 eight bases
+    inside it.
+    """
+    tlen = 130 if outer_span else 70
+    reads.read(
+        "frag",
+        40,
+        140,
+        flag=PAIRED | PROPER | MATE_REVERSE | READ1,
+        bases={101: "C", 112: "C"},
+        mate_start=10,
+        tlen=tlen,
+    )
+    reads.read(
+        "frag",
+        10,
+        110,
+        flag=PAIRED | PROPER | REVERSE | READ2,
+        bases={20: "C", 101: "C"},
+        mate_start=40,
+        tlen=-tlen,
+    )
+    assert rows_of(reads.extract()) == [{1: 1, 2: 1, 3: 1}]
+    assert rows_of(reads.extract(mask_3prime=1)) == [{1: 1, 2: 1, 3: -1}]
+    assert rows_of(reads.extract(mask_3prime=8)) == [{1: 1, 2: 1, 3: -1}]
+    assert rows_of(reads.extract(mask_3prime=9)) == [{1: 1, 2: -1, 3: -1}]
+
+
+@TLEN_CONVENTIONS
+def test_3prime_mask_of_bottom_strand_mates_extending_past_each_other(
+    reads, outer_span
+) -> None:
+    """The bottom strand's 3' end is where the forward-aligned mate starts.
+
+    Reverse mate (read 1) [10, 110), forward mate (read 2) [40, 140): the
+    fragment starts at 40. The Gs at 10 and 21, which only the reverse mate
+    reaches, lie before it.
+    """
+    tlen = 130 if outer_span else 70
+    reads.read(
+        "frag",
+        10,
+        110,
+        flag=PAIRED | PROPER | REVERSE | READ1,
+        strand="r",
+        bases={10: "G", 21: "G", 102: "G"},
+        mate_start=40,
+        tlen=-tlen,
+    )
+    reads.read(
+        "frag",
+        40,
+        140,
+        flag=PAIRED | PROPER | MATE_REVERSE | READ2,
+        strand="r",
+        bases={102: "G", 113: "G"},
+        mate_start=10,
+        tlen=tlen,
+    )
+    assert rows_of(reads.extract()) == [ALL_METHYLATED]
+    assert rows_of(reads.extract(mask_3prime=1)) == [{0: -1, 1: -1, 2: 1, 3: 1}]
+    assert rows_of(reads.extract(mask_3prime=62)) == [{0: -1, 1: -1, 2: 1, 3: 1}]
+    assert rows_of(reads.extract(mask_3prime=63)) == [{0: -1, 1: -1, 2: -1, 3: 1}]
+
+
+@TLEN_CONVENTIONS
+def test_3prime_mask_uses_an_earlier_mate_that_covers_no_cpg(reads, outer_span) -> None:
+    """A mate without CpGs opens no fragment, yet still marks the 3' end.
+
+    The reverse mate [30, 100) lies between the CpGs and comes first in the
+    BAM. Both CpGs the forward mate [40, 140) covers are beyond the
+    fragment's end at 100.
+    """
+    tlen = 110 if outer_span else 60
+    reads.read(
+        "frag",
+        40,
+        140,
+        flag=PAIRED | PROPER | MATE_REVERSE | READ1,
+        bases={101: "C", 112: "C"},
+        mate_start=30,
+        tlen=tlen,
+    )
+    reads.read(
+        "frag",
+        30,
+        100,
+        flag=PAIRED | PROPER | REVERSE | READ2,
+        mate_start=40,
+        tlen=-tlen,
+    )
+    assert rows_of(reads.extract()) == [{2: 1, 3: 1}]
+    assert rows_of(reads.extract(mask_3prime=1)) == [{2: -1, 3: -1}]
+    assert rows_of(reads.extract(mask_3prime=1, threads=2)) == [{2: -1, 3: -1}]
+
+
+def test_3prime_mask_uses_a_later_mate_that_covers_no_cpg(reads) -> None:
+    """The second mate's coordinates replace the estimate from the first.
+
+    The forward mate's TLEN claims a fragment of 154 bases; its reverse
+    mate, which covers no CpG, ends at 100. The mate is believed.
+    """
+    reads.read(
+        "frag",
+        0,
+        60,
+        flag=PAIRED | PROPER | MATE_REVERSE | READ1,
+        bases={9: "C", 20: "C"},
+        mate_start=70,
+        tlen=154,
+    )
+    reads.read(
+        "frag",
+        70,
+        100,
+        flag=PAIRED | PROPER | REVERSE | READ2,
+        mate_start=0,
+        tlen=-154,
+    )
+    # 79 bases from the end at 100 to the C at 20; 133 from an end at 154.
+    assert rows_of(reads.extract(mask_3prime=79)) == [{0: 1, 1: 1}]
+    assert rows_of(reads.extract(mask_3prime=80)) == [{0: 1, 1: -1}]
+
+
+def test_3prime_mask_falls_back_on_tlen_when_the_mate_is_filtered(reads) -> None:
+    """With its mate filtered out, a read locates the fragment end by TLEN.
+
+    Not by its own end at 60, which would put the C at 20 only 39 bases
+    from the end.
+    """
+    reads.pair(
+        "frag",
+        left=(0, 60),
+        right=(94, 154),
+        left_bases={9: "C", 20: "C"},
+        right_bases={101: "C", 112: "C"},
+        right_kwargs={"mapq": 0},
+    )
+    assert rows_of(reads.extract(mask_3prime=40)) == [{0: 1, 1: 1}]
+    assert rows_of(reads.extract(mask_3prime=133)) == [{0: 1, 1: 1}]
+    assert rows_of(reads.extract(mask_3prime=134)) == [{0: 1, 1: -1}]
+
+
+def test_3prime_mask_forgets_ends_whose_mate_never_came(reads, monkeypatch) -> None:
+    """Ends noted for mates that never arrive are discarded, not accumulated."""
+    monkeypatch.setattr(functions, "_MAX_ENDS_SEEN", 1)
+    # A reverse mate without CpGs whose forward mate (due at 40) is absent...
+    reads.read(
+        "orphan",
+        30,
+        100,
+        flag=PAIRED | PROPER | REVERSE | READ2,
+        mate_start=40,
+        tlen=-60,
+    )
+    # ...then, past that position, a complete pair of the same shape.
+    reads.read(
+        "frag",
+        50,
+        100,
+        flag=PAIRED | PROPER | REVERSE | READ2,
+        mate_start=60,
+        tlen=-40,
+    )
+    reads.read(
+        "frag",
+        60,
+        154,
+        flag=PAIRED | PROPER | MATE_REVERSE | READ1,
+        bases={101: "C", 112: "C"},
+        mate_start=50,
+        tlen=40,
+    )
+    assert rows_of(reads.extract(mask_3prime=1)) == [{2: -1, 3: -1}]
+
+
+# ---------------------------------------------------------------------------
+# Filters that trust the BAM's own annotations say so when they bite hard
+# ---------------------------------------------------------------------------
+
+
+def test_warning_when_most_reads_are_improper_pairs(reads, monkeypatch) -> None:
+    """An aligner that never sets the proper-pair flag must not go unnoticed.
+
+    Every paired read would be dropped, and the output would simply be
+    (nearly) empty.
+    """
+    for index in range(3):
+        reads.pair(
+            f"unflagged{index}",
+            left=(index, 60),
+            right=(94, 154 - index),
+            left_bases={9: "C", 20: "C"},
+            right_bases={101: "C", 112: "C"},
+            left_kwargs={"flag": PAIRED | MATE_REVERSE | READ1},
+            right_kwargs={"flag": PAIRED | REVERSE | READ2},
+        )
+    reads.read("single", 0, 60, bases={9: "C", 20: "T"})
+
+    # Six of seven reads dropped, but far fewer than the 1,000 needed to say
+    # anything about a real BAM.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = reads.extract()
+    assert rows_of(result) == [{0: 1, 1: 0}]
+    assert result.stats["reads_dropped_improper_pair"] == 6
+    assert result.stats["reads_used"] == 1
+
+    monkeypatch.setattr(functions, "_FILTER_MAJORITY_MIN_COUNT", 6)
+    with pytest.warns(RuntimeWarning) as recorded:
+        reads.extract()
+    assert len(recorded) == 1
+    message = str(recorded[0].message)
+    assert "6 of 7 otherwise usable reads (85.7%)" in message
+    assert "not flagged as a proper pair" in message
+    assert "--keep-improper-pairs" in message
+
+    # Kept, as the warning suggests: nothing dropped, nothing to warn about.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        kept = reads.extract(keep_improper_pairs=True)
+    assert len(rows_of(kept)) == 4
+    assert kept.stats["fragments_from_two_mates"] == 3
+
+
+def test_no_improper_pair_warning_at_half(reads, monkeypatch) -> None:
+    """Exactly half is not "more than half"."""
+    monkeypatch.setattr(functions, "_FILTER_MAJORITY_MIN_COUNT", 2)
+    reads.pair(
+        "improper",
+        left=(0, 60),
+        right=(94, 154),
+        left_kwargs={"flag": PAIRED | MATE_REVERSE | READ1},
+        right_kwargs={"flag": PAIRED | REVERSE | READ2},
+    )
+    reads.pair(
+        "proper",
+        left=(1, 60),
+        right=(94, 153),
+        left_bases={9: "C", 20: "C"},
+        right_bases={101: "C", 112: "C"},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = reads.extract()
+    assert result.stats["reads_dropped_improper_pair"] == 2
+    assert result.stats["reads_used"] == 2
+
+
+def test_warning_when_most_calls_are_low_quality(reads, monkeypatch) -> None:
+    """Placeholder base qualities must not silently empty the output."""
+    placeholder = {position: 2 for position in range(154)}
+    reads.read(
+        "read",
+        0,
+        154,
+        bases={9: "C", 20: "T", 101: "C", 112: "T"},
+        qualities=placeholder,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = reads.extract()
+    assert rows_of(result) == [{0: -1, 1: -1, 2: -1, 3: -1}]
+    assert result.stats["cpg_low_base_quality"] == 4
+
+    monkeypatch.setattr(functions, "_FILTER_MAJORITY_MIN_COUNT", 4)
+    with pytest.warns(RuntimeWarning) as recorded:
+        reads.extract()
+    assert len(recorded) == 1
+    message = str(recorded[0].message)
+    assert "4 of 4 CpG calls (100.0%)" in message
+    assert "minimum base quality of 20" in message
+    assert "--min-base-quality 0" in message
+
+    # With the filter off, as the warning suggests, the calls are back.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        unfiltered = reads.extract(min_base_quality=0)
+    assert rows_of(unfiltered) == [{0: 1, 1: 0, 2: 1, 3: 0}]
+
+
+def test_default_majority_warning_limits() -> None:
+    """The shipped limits: over half, of at least 1,000."""
+    assert functions._FILTER_MAJORITY_WARNING_RATE == 0.5
+    assert functions._FILTER_MAJORITY_MIN_COUNT == 1000

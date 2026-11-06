@@ -34,12 +34,14 @@ def test_threads_2_matches_threads_1_on_test_bam():
     serial = functions.extract_methylation_data_from_bam(
         input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
+        allow_length_mismatch=True,  # hg38 BAM, 700 kb stand-in reference
         quality_limit=20,
         threads=1,
     )
     parallel = functions.extract_methylation_data_from_bam(
         input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
+        allow_length_mismatch=True,  # hg38 BAM, 700 kb stand-in reference
         quality_limit=20,
         threads=2,
     )
@@ -51,12 +53,14 @@ def test_threads_4_matches_threads_1_on_test_bam():
     serial = functions.extract_methylation_data_from_bam(
         input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
+        allow_length_mismatch=True,  # hg38 BAM, 700 kb stand-in reference
         quality_limit=20,
         threads=1,
     )
     parallel = functions.extract_methylation_data_from_bam(
         input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
+        allow_length_mismatch=True,  # hg38 BAM, 700 kb stand-in reference
         quality_limit=20,
         threads=4,
     )
@@ -69,6 +73,7 @@ def test_threads_invalid_value():
         functions.extract_methylation_data_from_bam(
             input_bam=TEST_BAM,
             genome_methylation_embedding=TEST_EMBEDDING,
+            allow_length_mismatch=True,  # hg38 BAM, 700 kb stand-in reference
             threads=0,
         )
 

@@ -45,11 +45,14 @@ Output Format:
     - Rows represent sequenced DNA fragments (read pairs combined into one
       row; single-end reads are one row each)
     - Columns represent CpG sites (ordered by genomic position)
-    - Values are: 1 (methylated), 0 (unmethylated), -1 (no data/indel/SNV)
+    - Values are: 1 (methylated), 0 (unmethylated), -1 (covered, but no
+      usable call: the read does not show an intact CpG there, the base
+      quality is too low, the CpG is in the masked 3' end of the fragment,
+      or the two mates disagree)
 
 See Also:
     - README.md for installation and usage instructions
     - https://mcwdsi.github.io/bam2tensor for full documentation
 """
 
-__version__ = "2.8"
+__version__ = "3.0"

@@ -106,6 +106,7 @@ def test_inspect_end_to_end(tmp_path) -> None:
             str(tmp_path / "test.bam"),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -185,3 +186,65 @@ def test_inspect_tlen_all_zero(tmp_path) -> None:
     result = runner.invoke(inspect_main, [npz_path])
     assert result.exit_code == 0
     assert "single-end" in result.output
+
+
+def test_inspect_exits_nonzero_for_an_unreadable_file(tmp_path) -> None:
+    """A corrupt file is reported and makes the command fail.
+
+    Regression: the error was printed but the exit status stayed 0, so a
+    pipeline validating its outputs with this command saw success.
+    """
+    corrupt = tmp_path / "corrupt.methylation.npz"
+    corrupt.write_bytes(b"this is not a zip archive")
+
+    result = CliRunner().invoke(inspect_main, [str(corrupt)])
+    assert result.exit_code == 1
+    assert "corrupt.methylation.npz" in result.output
+    assert "Error:" in result.output
+
+
+def test_inspect_reports_good_files_alongside_a_bad_one(tmp_path) -> None:
+    """One unreadable file does not stop the others; the status is still 1."""
+    good = str(tmp_path / "good.methylation.npz")
+    scipy.sparse.save_npz(
+        good, scipy.sparse.coo_matrix(([1], ([0], [0])), shape=(1, 9))
+    )
+    truncated = tmp_path / "truncated.methylation.npz"
+    with open(good, "rb") as source:
+        truncated.write_bytes(source.read()[:40])
+    also_good = str(tmp_path / "also_good.methylation.npz")
+    shutil.copy(good, also_good)
+
+    result = CliRunner().invoke(inspect_main, [good, str(truncated), also_good])
+    assert result.exit_code == 1
+    assert "good.methylation.npz" in result.output
+    assert "also_good.methylation.npz" in result.output
+    assert result.output.count("CpG sites:       9") == 2
+    assert "truncated.methylation.npz" in result.output
+
+
+def test_inspect_shows_the_call_filters(tmp_path) -> None:
+    """The settings a file was made with are part of its summary."""
+    npz_path = str(tmp_path / "sample.methylation.npz")
+    scipy.sparse.save_npz(
+        npz_path, scipy.sparse.coo_matrix(([1], ([0], [0])), shape=(1, 9))
+    )
+    write_npz_metadata(
+        npz_path,
+        {
+            "filters": {
+                "min_mapping_quality": 30,
+                "min_base_quality": 20,
+                "mask_3prime": 10,
+                "keep_improper_pairs": False,
+                "non_converted_reads": {"enabled": False, "threshold": 3},
+                "em_overconversion": {"enabled": False, "min_cpgs": 3},
+            }
+        },
+    )
+    result = CliRunner().invoke(inspect_main, [npz_path])
+    assert result.exit_code == 0
+    assert "Filters:         MAPQ >= 30" in result.output
+    assert "base quality >= 20" in result.output
+    assert "improper pairs dropped" in result.output
+    assert "3' end mask (10 bp)" in result.output

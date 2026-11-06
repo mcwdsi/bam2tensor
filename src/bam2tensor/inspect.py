@@ -127,6 +127,18 @@ def inspect_npz(npz_path: str) -> None:
     if meta and "filters" in meta:
         filters = meta["filters"]
         active = []
+        if "min_mapping_quality" in filters:
+            active.append(f"MAPQ >= {filters['min_mapping_quality']}")
+        if filters.get("min_base_quality"):
+            active.append(f"base quality >= {filters['min_base_quality']}")
+        if "keep_improper_pairs" in filters:
+            active.append(
+                "improper pairs kept"
+                if filters["keep_improper_pairs"]
+                else "improper pairs dropped"
+            )
+        if filters.get("mask_3prime"):
+            active.append(f"3' end mask ({filters['mask_3prime']} bp)")
         nc = filters.get("non_converted_reads", {})
         if nc.get("enabled"):
             active.append(f"non-converted (>= {nc.get('threshold')} non-CpG Cs)")
@@ -167,17 +179,26 @@ def main(files: tuple[str, ...]) -> None:
     Prints a summary of each file including matrix dimensions, sparsity,
     embedded metadata, and file size.
 
+    A file that cannot be read is reported on standard error and the
+    remaining files are still inspected; the exit status is then 1.
+
     Args:
         files: One or more paths to ``.methylation.npz`` files.
     """
+    failed = 0
     for i, path in enumerate(files):
         if i > 0:
             print()
         try:
             inspect_npz(path)
         except Exception as e:
+            failed += 1
             print(f"{os.path.basename(path)}", file=sys.stderr)
             print(f"  Error: {e}", file=sys.stderr)
+    # A corrupt or unreadable file must not look like a success to a
+    # pipeline that validates outputs with this command.
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -8,22 +8,28 @@ each CpG site, with one row per sequenced DNA fragment.
 
 The extraction process:
     1. Iterates through each chromosome in the genome embedding
-    2. For each aligned read that passes quality filters:
+    2. For each aligned read that passes the read filters:
        a. Determines which bisulfite strand the fragment derives from
        b. Identifies the CpG sites whose informative base the read covers
-       c. Extracts the methylation state at each of those CpGs
+       c. Extracts the methylation state at each of those CpGs, keeping
+          a call only where the read shows an intact CpG on a base of
+          sufficient quality
     3. Combines the two mates of a read pair into a single fragment
     4. Builds a sparse COO matrix with one row per fragment
 
 Methylation State Encoding:
     - 1: Methylated (cytosine remained as C after bisulfite treatment)
     - 0: Unmethylated (cytosine converted to T by bisulfite treatment)
-    - -1: No data (indel, SNV, other non-C/T base at the CpG, or the two
-      mates of a pair disagreeing)
+    - -1: No usable call. The fragment covers the CpG, but the read does
+      not show an intact CpG there (an indel, SNV or other unexpected
+      base at either base of the CpG), the base carrying the call is
+      below the minimum base quality, the CpG lies in the masked 3' end
+      of the fragment (opt-in), or the two mates of a pair disagree.
 
 Strands and the informative base:
     A fragment derives from either the top or the bottom strand of the
-    original DNA, and both mates of a pair report on that same strand. BAM
+    original DNA, and both mates of a proper pair report on that same
+    strand. BAM
     stores every read in top-strand orientation, so for a CpG whose C is at
     reference position p:
 
@@ -94,10 +100,41 @@ class ExtractionResult(NamedTuple):
         tlen: 1-D numpy array of shape (n_fragments,) containing the
             length of each fragment (the absolute BAM TLEN). 0 for
             single-end reads or reads with unmapped mates.
+        stats: Counts describing what the extraction saw and discarded,
+            for quality control (the CLI stores them in the output file's
+            metadata). Keys:
+
+            - ``reads_used``: reads that passed every read filter
+              (mapping quality, flags, proper pair), whether or not they
+              cover a CpG.
+            - ``reads_dropped_improper_pair``: reads skipped because
+              they are paired but not flagged as a proper pair.
+            - ``reads_without_md``: reads the non-converted filter could
+              not evaluate for lack of an ``MD`` tag.
+            - ``fragments_from_two_mates``: fragments in which the calls
+              of two mates were combined (counted before the
+              fragment-level filters).
+            - ``cpg_observations``: CpGs decoded, counted per read
+              (before the two mates of a pair are combined).
+            - ``cpg_not_intact``: observations stored as ``-1`` because
+              the read does not show an intact CpG there.
+            - ``cpg_reference_mismatch``: how many of those disagree with
+              the reference in a way a wrong strand tag cannot explain
+              (the count behind the reference check).
+            - ``cpg_low_base_quality``: observations stored as ``-1``
+              because the base carrying the call is below the minimum
+              base quality.
+            - ``cpg_masked_3prime``: calls stored as ``-1`` because they
+              lie in the masked 3' end of their fragment (counted per
+              fragment, after the mates are combined).
+            - ``strand_checks`` and ``strand_contradictions``: the
+              strand-tag check (CpGs examined, and how many contradict
+              their read's strand tag).
     """
 
     matrix: scipy.sparse.coo_matrix
     tlen: np.ndarray
+    stats: dict[str, int]
 
 
 # BAM flag bits for reads to skip: duplicate (0x400), qcfail (0x200),
@@ -173,8 +210,9 @@ def count_non_cpg_retained_reference(
 
     Args:
         aligned_segment: A pysam aligned read. Must carry an ``MD``
-            tag; BAMs produced by Bismark, Biscuit, bwameth and gem3
-            all set this tag by default.
+            tag. bwa-meth writes one; gem3 does not for bisulfite
+            alignments, so its reads cannot be evaluated unless the tag
+            is added afterwards (for example with ``samtools calmd``).
         is_reverse_parent_strand: ``True`` if the read derives from the
             reverse (OB/CTOB) bisulfite parent strand, ``False`` for
             the forward (OT/CTOT) strand.
@@ -246,9 +284,14 @@ def is_em_overconversion_read(
     molecule. At constitutively methylated loci these reads are purely
     technical. Without a per-region methylation prior, the simplest
     correction consistent with their observation is: drop reads whose
-    covered CpGs are all called unmethylated *and* cover at least
-    ``min_cpgs`` sites (the paper's Fig. 1C regime where the artifact
-    diverges clearly from WGBS).
+    CpG calls are all unmethylated *and* number at least ``min_cpgs``
+    (the paper's Fig. 1C regime where the artifact diverges clearly
+    from WGBS).
+
+    CpGs without a usable call (``-1``) are left out of the decision
+    altogether: they are neither evidence of methylation nor counted
+    towards ``min_cpgs``. Otherwise a single low-quality base would
+    shield an otherwise fully unmethylated fragment from the filter.
 
     This heuristic also drops genuinely fully-unmethylated biological
     fragments, so callers should opt in only when the downstream
@@ -258,13 +301,13 @@ def is_em_overconversion_read(
         read_cpg_states: Per-CpG methylation state values for a single
             read, in column-order, using the bam2tensor encoding
             (``1``=methylated, ``0``=unmethylated, ``-1``=no data).
-        min_cpgs: Minimum number of covered CpGs required to apply the
-            filter. Reads with fewer covered CpGs are never flagged.
+        min_cpgs: Minimum number of CpG calls required to apply the
+            filter. Reads with fewer calls are never flagged.
 
     Returns:
-        ``True`` when the read has at least ``min_cpgs`` covered CpGs
-        and every covered CpG is called unmethylated (value ``0``).
-        ``-1`` (no-data) values do not count as unmethylated.
+        ``True`` when the read has at least ``min_cpgs`` CpG calls and
+        every one of them is unmethylated (value ``0``). ``-1``
+        (no usable call) values are ignored.
 
     Example:
         >>> is_em_overconversion_read([0, 0, 0], min_cpgs=3)
@@ -273,10 +316,12 @@ def is_em_overconversion_read(
         False
         >>> is_em_overconversion_read([0, 0], min_cpgs=3)
         False
+        >>> is_em_overconversion_read([0, 0, -1], min_cpgs=3)
+        False
+        >>> is_em_overconversion_read([0, 0, -1, 0], min_cpgs=3)
+        True
     """
-    if len(read_cpg_states) < min_cpgs:
-        return False
-    return all(state == 0 for state in read_cpg_states)
+    return read_cpg_states.count(0) >= min_cpgs and 1 not in read_cpg_states
 
 
 def detect_aligner(input_bam: str, sample_size: int = 1000) -> str:
@@ -393,6 +438,56 @@ def check_chromosome_overlap(
     )
 
 
+def check_chromosome_lengths(
+    bam_lengths: dict[str, int],
+    reference_lengths: dict[str, int],
+) -> None:
+    """Check that the BAM was aligned to chromosomes of the reference's lengths.
+
+    A BAM records the length of every sequence it was aligned to. If a
+    chromosome has one length there and another in the reference FASTA the
+    CpG index was built from, the two are different assemblies (hg19 and
+    hg38, say) that merely share chromosome names. Positions do not
+    correspond between them, so the reads would be decoded at positions
+    that are not CpGs in the genome they were aligned to.
+
+    Only chromosomes present under the same name on both sides are
+    compared.
+
+    Args:
+        bam_lengths: Sequence name to length, from the BAM header.
+        reference_lengths: Chromosome name to length, from the reference
+            FASTA (``GenomeMethylationEmbedding.chromosome_lengths``).
+
+    Raises:
+        ValueError: If any shared chromosome differs in length.
+
+    Example:
+        >>> check_chromosome_lengths({"chr1": 1000}, {"chr1": 1000, "chr2": 500})
+    """
+    mismatched = [
+        (name, bam_lengths[name], length)
+        for name, length in reference_lengths.items()
+        if name in bam_lengths and bam_lengths[name] != length
+    ]
+    if not mismatched:
+        return
+    shown = ", ".join(
+        f"{name} ({bam_length:,} bp in the BAM, {length:,} bp in the reference)"
+        for name, bam_length, length in mismatched[:3]
+    )
+    if len(mismatched) > 3:
+        shown += f", ... ({len(mismatched)} chromosomes in total)"
+    raise ValueError(
+        "The BAM file was not aligned to the reference FASTA provided: "
+        f"chromosome lengths differ for {shown}. Positions do not correspond "
+        "between two different assemblies, so the methylation calls would be "
+        "wrong. Use the reference the BAM was aligned to. (If the FASTA is a "
+        "deliberately truncated copy of that reference, the check can be "
+        "turned off with --allow-length-mismatch.)"
+    )
+
+
 class _ChromExtractionResult(NamedTuple):
     """Per-chromosome extraction output used by :func:`_extract_chromosome`.
 
@@ -425,6 +520,24 @@ class _ChromExtractionResult(NamedTuple):
             converted was examined.
         strand_contradictions: How many of those showed the other
             strand's conversion product, contradicting the tag.
+        improper_pair_reads: Reads skipped because they are paired but
+            not flagged as a proper pair.
+        reads_used: Reads that passed every read filter.
+        paired_fragments: Fragments in which the calls of two mates were
+            combined.
+        cpg_observations: CpGs decoded, counted per read (before mates
+            are combined).
+        cpgs_not_intact: Observations recorded as ``-1`` because the
+            read does not show an intact CpG.
+        cpgs_mismatched: How many of those disagree with the reference in
+            a way a wrong strand tag cannot explain (every reason except
+            the other strand's conversion product at the CpG's other
+            base).
+        cpgs_low_quality: Observations recorded as ``-1`` because the
+            base carrying the call is below the minimum base quality.
+        cpgs_masked: Calls recorded as ``-1`` because they lie in the
+            masked 3' end of their fragment (counted per fragment, after
+            the mates are combined).
     """
 
     cols: np.ndarray
@@ -435,6 +548,14 @@ class _ChromExtractionResult(NamedTuple):
     reads_without_md: int = 0
     strand_checks: int = 0
     strand_contradictions: int = 0
+    improper_pair_reads: int = 0
+    reads_used: int = 0
+    paired_fragments: int = 0
+    cpg_observations: int = 0
+    cpgs_not_intact: int = 0
+    cpgs_mismatched: int = 0
+    cpgs_low_quality: int = 0
+    cpgs_masked: int = 0
 
 
 class _ExtractionConfig(NamedTuple):
@@ -456,6 +577,9 @@ class _ExtractionConfig(NamedTuple):
     non_converted_threshold: int
     filter_em_overconversion: bool
     em_overconversion_min_cpgs: int
+    min_base_quality: int
+    mask_3prime: int
+    keep_improper_pairs: bool
     debug: bool
     col_typecode: str = "i"
 
@@ -540,6 +664,128 @@ _STRAND_CHECK_MIN_CPGS = 1000
 # are reported as two separate fragments.
 _MAX_MATE_DISTANCE = 100_000
 
+# Two of the default filters act on what the BAM says about itself: the
+# proper-pair flag and the base qualities. A BAM that does not carry them in
+# the usual way (an aligner that never sets the flag; placeholder qualities)
+# would have most of its data discarded without a word. A BAM is flagged when
+# more than this fraction of its otherwise usable reads are dropped as
+# improper pairs, or of its otherwise usable CpG calls for low base quality...
+_FILTER_MAJORITY_WARNING_RATE = 0.5
+# ...provided at least this many reads, or calls, were dropped.
+_FILTER_MAJORITY_MIN_COUNT = 1000
+
+# 3' end masking: how many fragment ends noted by a CpG-less mate (see
+# ends_seen in _extract_chromosome) are kept before those whose other mate
+# never arrived are discarded.
+_MAX_ENDS_SEEN = 4096
+
+# Key under which no fragment is ever filed while awaiting its mate (see
+# _Fragment.key): the lookup key of a read that has no mate to be merged with.
+_NO_MATE_KEY: tuple[str, int, int] = ("", -1, -1)
+
+# Reference check. Wherever a read covers a CpG of the reference, the read is
+# expected to show a CpG too: at the base carrying the call, the methylated
+# or the unmethylated base; at the other base, the reference base. Sequencing
+# errors, SNPs and indels break this at a percent or two of CpGs. A BAM
+# decoded against a reference it was not aligned to breaks it at most of
+# them, because the positions taken to be CpGs are arbitrary positions of the
+# genome the reads were really aligned to.
+#
+# One way of not showing a CpG is left out of this count: the other strand's
+# conversion product at the CpG's other base. That is the signature of a
+# wrong strand tag, which the strand-tag check above reports.
+#
+# A BAM is flagged when more than this fraction of the CpGs decoded mismatch
+# the reference...
+_REFERENCE_MISMATCH_WARNING_RATE = 0.10
+# ...provided at least this many CpGs were decoded.
+_REFERENCE_MISMATCH_MIN_CPGS = 1000
+
+
+def _three_prime_end(
+    reference_start: int,
+    reference_end: int,
+    template_length: int,
+    is_reverse: bool,
+    mate_start: int | None,
+    bottom_strand: bool,
+) -> tuple[int, bool]:
+    """Locate the 3' end of a fragment's original strand, as seen by one read.
+
+    Library preparation repairs fragment ends before conversion: a recessed
+    3' end is filled in by a polymerase, using unmethylated cytosines. Those
+    cytosines are converted like any other unmethylated cytosine, so CpGs
+    within the filled-in stretch read as unmethylated whatever the original
+    molecule carried. The stretch is at the 3' end of the strand the
+    fragment derives from: the fragment's right-hand end for a top-strand
+    fragment, its left-hand end for a bottom-strand one.
+
+    Sequencing starts at the two ends of the fragment, so that end is where
+    one of the mates begins: the reverse-aligned mate for a top-strand
+    fragment (its reference end), the forward-aligned mate for a
+    bottom-strand fragment (its reference start). A read that is that mate
+    knows the end exactly. So does the reverse-aligned read of a
+    bottom-strand fragment, whose BAM record gives its mate's start. The
+    forward-aligned read of a top-strand fragment cannot know where its mate
+    ends, and estimates it from the template length; the estimate is
+    replaced by the mate's own coordinate if the mate passes the read
+    filters (see :func:`_extract_chromosome`). The template length is only a fallback
+    because aligners disagree on it when the mates extend past each other:
+    Bismark reports the outer span of the two alignments, bwa the distance
+    between their starting ends.
+
+    A read with no usable mate information (a single-end read, for
+    instance) falls back on its own alignment end, the only fragment end it
+    can vouch for.
+
+    Args:
+        reference_start: The read's 0-based reference start.
+        reference_end: The read's 0-based reference end (exclusive).
+        template_length: The read's BAM TLEN (signed; 0 if unknown).
+        is_reverse: Whether the read is aligned to the reverse strand
+            (BAM flag 0x10).
+        mate_start: 0-based reference start of the read's mate, if the
+            mate is mapped to the same chromosome and aligned forward;
+            otherwise ``None``.
+        bottom_strand: Whether the fragment derives from the bottom strand.
+
+    Returns:
+        The 0-based position of the fragment's 3' end — for a top-strand
+        fragment the position just past its last base, for a bottom-strand
+        fragment the position of its first base — and whether that is exact
+        rather than estimated.
+
+    Example:
+        >>> # Top-strand pair spanning [100, 300): the reverse mate knows.
+        >>> _three_prime_end(220, 300, -200, True, 100, False)
+        (300, True)
+        >>> _three_prime_end(100, 200, 200, False, None, False)
+        (300, False)
+        >>> # Bottom-strand pair spanning [100, 300): both mates know.
+        >>> _three_prime_end(100, 200, 200, False, None, True)
+        (100, True)
+        >>> _three_prime_end(220, 300, -200, True, 100, True)
+        (100, True)
+        >>> # Single-end reads: their own end.
+        >>> _three_prime_end(100, 200, 0, False, None, False)
+        (200, False)
+        >>> _three_prime_end(100, 200, 0, True, None, True)
+        (100, False)
+    """
+    if bottom_strand:
+        if not is_reverse:
+            return reference_start, True
+        if mate_start is not None:
+            return mate_start, True
+        if template_length < 0:
+            return reference_end + template_length, False
+        return reference_start, False
+    if is_reverse:
+        return reference_end, True
+    if template_length > 0:
+        return reference_start + template_length, False
+    return reference_end, False
+
 
 class _Fragment:
     """CpG calls for one DNA fragment, held until both mates have been seen.
@@ -555,6 +801,16 @@ class _Fragment:
         dropped: True if a filter removed the fragment. A dropped fragment
             stays queued while it awaits its mate, so that the mate is
             discarded with it rather than starting a fragment of its own.
+        key: While the fragment awaits its mate, the key it is filed under:
+            (query name, start of the first mate, start expected of the
+            second).
+        bottom_strand: Whether the fragment derives from the bottom strand
+            (as tagged on the read that opened it).
+        three_prime: 0-based position of the 3' end of the fragment's
+            original strand (see :func:`_three_prime_end`). Only maintained
+            when 3' end masking is on.
+        three_prime_exact: False while ``three_prime`` is an estimate that
+            the other mate's coordinates could still replace.
     """
 
     __slots__ = (
@@ -566,6 +822,10 @@ class _Fragment:
         "awaiting_mate",
         "mate_start",
         "dropped",
+        "key",
+        "bottom_strand",
+        "three_prime",
+        "three_prime_exact",
     )
 
     def __init__(
@@ -588,6 +848,10 @@ class _Fragment:
         self.awaiting_mate = False
         self.mate_start = -1
         self.dropped = False
+        self.key = _NO_MATE_KEY
+        self.bottom_strand = False
+        self.three_prime = 0
+        self.three_prime_exact = True
 
 
 def _bismark_is_bottom_strand(
@@ -725,10 +989,17 @@ def _extract_chromosome(
     opens a fragment the first time its query name is seen with CpG calls;
     if its mate is due later on the same chromosome the fragment waits for
     it, and the mate's calls are merged in when it arrives (see
-    :func:`_merge_mate_calls`). Fragments are written out in the order they
-    were opened, each as soon as it and everything ahead of it is complete
-    — a fragment stops waiting once its mate has been merged or the reads
-    have moved past where the mate should have been.
+    :func:`_merge_mate_calls`). The mate is recognised by its name, its
+    mate number and its position: it must start where the first read's
+    record says its mate starts, and point back at the first read's start.
+    Fragments are written out in the order they were opened, each as soon
+    as it and everything ahead of it is complete — a fragment stops waiting
+    once its mate has been merged or the reads have moved past where the
+    mate should have been.
+
+    A call is decoded per read (strand, intact CpG, base quality). The 3'
+    end mask is applied per fragment, as its row is written out, from the
+    coordinates of the mates themselves (see :func:`_three_prime_end`).
 
     Args:
         input_bam: Path to the indexed BAM file.
@@ -747,6 +1018,9 @@ def _extract_chromosome(
     non_converted_threshold = config.non_converted_threshold
     filter_em_overconversion = config.filter_em_overconversion
     em_overconversion_min_cpgs = config.em_overconversion_min_cpgs
+    min_base_quality = config.min_base_quality
+    mask_3prime = config.mask_3prime
+    keep_improper_pairs = config.keep_improper_pairs
     debug = config.debug
 
     # Typed buffers (see _ChromExtractionResult): column index and state per
@@ -773,18 +1047,64 @@ def _extract_chromosome(
         )
 
     # Fragments whose rows have not been written yet, in the order they were
-    # opened, and the subset still waiting for a second mate (by query name).
+    # opened, and the subset still waiting for a second mate, keyed by
+    # (query name, start of the first mate, start expected of the second).
     pending: collections.deque[_Fragment] = collections.deque()
-    awaiting_mate: dict[str, _Fragment] = {}
+    awaiting_mate: dict[tuple[str, int, int], _Fragment] = {}
 
     reads_without_md = 0
     strand_checks = 0
     strand_contradictions = 0
+    improper_pair_reads = 0
+    reads_used = 0
+    paired_fragments = 0
+    cpg_observations = 0
+    cpgs_not_intact = 0
+    cpgs_mismatched = 0
+    cpgs_low_quality = 0
+    cpgs_masked = 0
+
+    # 3' end masking only: where a top-strand fragment ends, as given by a
+    # reverse-aligned mate that covers no CpG itself (and so opens no
+    # fragment) but comes before its forward-aligned mate in the BAM. Keyed
+    # like awaiting_mate, for that mate to pick up.
+    ends_seen: dict[tuple[str, int, int], int] = {}
 
     def emit(fragment: _Fragment) -> None:
         # Write a finished fragment's row, unless a filter removed it.
+        nonlocal cpgs_masked
         if fragment.dropped:
             return
+        if mask_3prime:
+            # Discard calls within mask_3prime bases of the 3' end of the
+            # fragment's original strand. Done here, once both mates have
+            # been seen, so that the end is the one the mates themselves
+            # give and both are masked alike. Columns ascend with position
+            # (column col_offset + i is the CpG at cpg_sites[i], the 1-based
+            # position of its C and the 0-based position of its G), so the
+            # masked calls are the last few of a top-strand fragment and the
+            # first few of a bottom-strand one.
+            cols, data = fragment.cols, fragment.data
+            if fragment.bottom_strand:
+                # Calls sit on the G: masked if it starts fewer than
+                # mask_3prime bases after the fragment's first base.
+                limit = fragment.three_prime + mask_3prime
+                for index, col in enumerate(cols):
+                    if cpg_sites[col - col_offset] >= limit:
+                        break
+                    if data[index] != -1:
+                        data[index] = -1
+                        cpgs_masked += 1
+            else:
+                # Calls sit on the C: masked if it is among the last
+                # mask_3prime bases of the fragment.
+                limit = fragment.three_prime - mask_3prime
+                for index in range(len(cols) - 1, -1, -1):
+                    if cpg_sites[cols[index] - col_offset] - 1 < limit:
+                        break
+                    if data[index] != -1:
+                        data[index] = -1
+                        cpgs_masked += 1
         if filter_em_overconversion and is_em_overconversion_read(
             fragment.data, em_overconversion_min_cpgs
         ):
@@ -803,7 +1123,17 @@ def _extract_chromosome(
         # Single bitwise check replaces separate flag checks: duplicate
         # (0x400), qcfail (0x200), secondary (0x100), supplementary (0x800),
         # unmapped (0x4).
-        if aligned_segment.flag & _SKIP_FLAGS:
+        flag = aligned_segment.flag
+        if flag & _SKIP_FLAGS:
+            continue
+
+        # A paired read (0x1) that the aligner did not mark as properly
+        # paired (0x2): its mate is unmapped, on another chromosome, in the
+        # wrong orientation or implausibly far away. Such pairs are enriched
+        # for chimeric and mis-aligned molecules, so both mates are dropped
+        # unless asked for. Single-end reads carry neither bit and are kept.
+        if (flag & 0x3) == 0x1 and not keep_improper_pairs:
+            improper_pair_reads += 1
             continue
 
         # A read flagged as mapped but carrying no alignment (e.g. CIGAR
@@ -812,6 +1142,7 @@ def _extract_chromosome(
         if reference_end is None:
             continue
         reference_start = aligned_segment.reference_start
+        reads_used += 1
 
         # Write out, in order, every fragment that can no longer change. The
         # fragment at the head of the queue is finished once its mate has
@@ -824,15 +1155,58 @@ def _extract_chromosome(
             if head.awaiting_mate and head.mate_start >= reference_start:
                 break
             pending.popleft()
-            if head.awaiting_mate and awaiting_mate.get(head.name) is head:
-                del awaiting_mate[head.name]
+            if head.awaiting_mate and awaiting_mate.get(head.key) is head:
+                del awaiting_mate[head.key]
             emit(head)
+
+        name = aligned_segment.query_name
+        assert name is not None
+        is_read1 = aligned_segment.is_read1
+
+        # Is a fragment already waiting for exactly this read? Its first mate
+        # must have the same name, the other mate number, start where this
+        # read says its mate starts, and expect its mate where this read
+        # starts. Matching on the coordinates as well as the name keeps two
+        # unrelated pairs that share a name from being combined.
+        mate_key = _NO_MATE_KEY
+        if (
+            flag & 0x1
+            and not flag & 0x8
+            and aligned_segment.next_reference_id == aligned_segment.reference_id
+        ):
+            mate_key = (name, aligned_segment.next_reference_start, reference_start)
+        partner = awaiting_mate.get(mate_key)
+        if partner is not None and partner.is_read1 == is_read1:
+            partner = None
+
+        # For 3' end masking: a forward-aligned mate that mapped where this
+        # read's record says, and — if this read completes a fragment whose
+        # 3' end was only estimated — the end as this read knows it. This
+        # comes before any reason to skip the read's calls, since a mate
+        # that covers no CpG still shows where the fragment ends.
+        if mask_3prime:
+            forward_mate_start = (
+                aligned_segment.next_reference_start
+                if mate_key is not _NO_MATE_KEY and not flag & 0x20
+                else None
+            )
+            if partner is not None and not partner.three_prime_exact:
+                three_prime, exact = _three_prime_end(
+                    reference_start,
+                    reference_end,
+                    aligned_segment.template_length,
+                    bool(flag & 0x10),
+                    forward_mate_start,
+                    partner.bottom_strand,
+                )
+                if exact:
+                    partner.three_prime = three_prime
+                    partner.three_prime_exact = True
 
         # ============================================================
         # Which strand of the original DNA does this fragment derive
-        # from? Both mates of a pair report on the same strand, so this
-        # depends on the aligner's strand tag — never on the read's own
-        # alignment orientation.
+        # from? This depends on the aligner's strand tag — never on the
+        # read's own alignment orientation.
         # ============================================================
         xm_tag: str | None = None
         non_converted = False
@@ -868,7 +1242,7 @@ def _extract_chromosome(
             else:
                 # No strand information: the read cannot be decoded.
                 if debug:
-                    print(f"\t{aligned_segment.query_name}: no strand tag, ignoring.")
+                    print(f"\t{name}: no strand tag, ignoring.")
                 continue
 
             # Non-converted filter (Biscuit/bwameth/gem3): count retained
@@ -904,23 +1278,23 @@ def _extract_chromosome(
             # whole fragment goes: a mate already queued is dropped, and a
             # mate still to come is discarded when it arrives.
             if debug:
-                print(f"\tNon-converted filter: dropping {aligned_segment.query_name}.")
-            name = aligned_segment.query_name
-            assert name is not None
-            partner = awaiting_mate.get(name)
-            if partner is not None and partner.is_read1 != aligned_segment.is_read1:
-                del awaiting_mate[name]
+                print(f"\tNon-converted filter: dropping {name}.")
+            if partner is not None:
+                del awaiting_mate[mate_key]
                 partner.awaiting_mate = False
                 partner.dropped = True
-            elif partner is None:
+            else:
                 mate_start = _mate_start_if_expected(aligned_segment, reference_start)
                 if mate_start is not None:
-                    placeholder = _Fragment(name, aligned_segment.is_read1, [], [], 0)
-                    placeholder.dropped = True
-                    placeholder.awaiting_mate = True
-                    placeholder.mate_start = mate_start
-                    pending.append(placeholder)
-                    awaiting_mate[name] = placeholder
+                    own_key = (name, reference_start, mate_start)
+                    if own_key not in awaiting_mate:
+                        placeholder = _Fragment(name, is_read1, [], [], 0)
+                        placeholder.dropped = True
+                        placeholder.awaiting_mate = True
+                        placeholder.mate_start = mate_start
+                        placeholder.key = own_key
+                        pending.append(placeholder)
+                        awaiting_mate[own_key] = placeholder
             continue
 
         # ============================================================
@@ -938,23 +1312,62 @@ def _extract_chromosome(
         )
         end_idx = bisect.bisect_right(cpg_sites, reference_end - informative_offset)
         if start_idx >= end_idx:
+            # No CpG, so no fragment to open. If this is the mate that marks
+            # the 3' end of a top-strand fragment and the other mate is still
+            # to come, leave the end where that mate will find it.
+            if mask_3prime and partner is None and flag & 0x10 and not bottom_strand:
+                mate_start = _mate_start_if_expected(aligned_segment, reference_start)
+                if mate_start is not None:
+                    if len(ends_seen) >= _MAX_ENDS_SEEN:
+                        # Forget mates that never turned up: the reads have
+                        # moved past where they were due.
+                        ends_seen = {
+                            key: end
+                            for key, end in ends_seen.items()
+                            if key[2] >= reference_start
+                        }
+                    ends_seen[(name, reference_start, mate_start)] = reference_end
             continue
+
+        # Bismark calls can be read without the bases; everything else needs
+        # them.
+        sequence = aligned_segment.query_sequence
+        if sequence is None:
+            if xm_tag is None:
+                continue
+            bases = ""
+        else:
+            bases = sequence
 
         # 0-based reference positions of the two bases of each of those CpGs.
         # cpg_sites holds the 1-based position of each C, which is also the
         # 0-based position of its G.
+        #
+        # BAM SEQ is in top-strand orientation, so a top-strand fragment
+        # shows C (methylated) or T (unmethylated) at the C of the CpG, and a
+        # bottom-strand fragment shows G (methylated) or A (unmethylated) at
+        # the G. The CpG's other base belongs to the strand the read does not
+        # report on, so it must still read as the reference has it: a G after
+        # the C for a top-strand read, a C before the G for a bottom-strand
+        # read. The other strand's conversion product there (A at the G, T at
+        # the C) contradicts the strand tag.
         g_positions = cpg_sites[start_idx:end_idx]
         c_positions = [position - 1 for position in g_positions]
         if bottom_strand:
             informative_positions, partner_positions = g_positions, c_positions
+            methylated_base, unmethylated_base = "G", "A"
+            partner_base, contradicting_base = "C", "T"
+            partner_step = -1
         else:
             informative_positions, partner_positions = c_positions, g_positions
+            methylated_base, unmethylated_base = "C", "T"
+            partner_base, contradicting_base = "G", "A"
+            partner_step = 1
 
-        # Where each informative base falls in the read (absent if deleted
-        # from the read). Reads decoded from their bases also get the
-        # strand-tag check, which looks at each CpG's other base as well.
+        # Where each of those bases falls in the read (absent if deleted
+        # from the read).
         wanted = set(informative_positions)
-        if xm_tag is None:
+        if bases:
             wanted.update(partner_positions)
         query_position = {
             ref_pos: query_pos
@@ -964,65 +1377,81 @@ def _extract_chromosome(
             if ref_pos in wanted
         }
 
+        qualities = aligned_segment.query_qualities if min_base_quality > 0 else None
+
+        xm_length = len(xm_tag) if xm_tag is not None else 0
         read_data: list[int] = []
-        if xm_tag is not None:
-            # Bismark: Z = methylated CpG, z = unmethylated CpG. Anything
-            # else at a CpG (a mismatch, or a base deleted from the read)
-            # is no data.
-            xm_length = len(xm_tag)
-            for ref_pos in informative_positions:
-                query_pos = query_position.get(ref_pos)
-                if query_pos is None or query_pos >= xm_length:
-                    read_data.append(-1)
-                else:
-                    call = xm_tag[query_pos]
-                    read_data.append(1 if call == "Z" else 0 if call == "z" else -1)
-        else:
-            # Biscuit / bwameth / gem3: read the base itself. BAM SEQ is in
-            # top-strand orientation, so a top-strand fragment shows C
-            # (methylated) or T (unmethylated) at the C of the CpG, and a
-            # bottom-strand fragment shows G (methylated) or A
-            # (unmethylated) at the G.
-            sequence = aligned_segment.query_sequence
-            if sequence is None:
-                continue
-            if bottom_strand:
-                methylated_base, unmethylated_base = "G", "A"
-                # The C of the CpG belongs to the top strand: a T there is a
-                # top-strand conversion, which a bottom-strand read cannot show.
-                contradicting_base = "T"
+        for ref_pos, partner_ref_pos in zip(informative_positions, partner_positions):
+            # The call itself, from the informative base.
+            low_quality = False
+            query_pos = query_position.get(ref_pos)
+            if query_pos is None:
+                state = -1  # deleted from the read
             else:
-                methylated_base, unmethylated_base = "C", "T"
-                # Likewise an A at the G is a bottom-strand conversion.
-                contradicting_base = "A"
-            for ref_pos, partner_ref_pos in zip(
-                informative_positions, partner_positions
-            ):
-                query_pos = query_position.get(ref_pos)
-                if query_pos is None:
-                    read_data.append(-1)  # deleted from the read
+                if xm_tag is not None:
+                    # Bismark: Z = methylated CpG, z = unmethylated CpG.
+                    # Anything else at a CpG is a mismatch.
+                    call = xm_tag[query_pos] if query_pos < xm_length else "."
+                    state = 1 if call == "Z" else 0 if call == "z" else -1
                 else:
-                    base = sequence[query_pos]
-                    read_data.append(
+                    base = bases[query_pos]
+                    state = (
                         1
                         if base == methylated_base
                         else 0 if base == unmethylated_base else -1
                     )
+                low_quality = (
+                    qualities is not None and qualities[query_pos] < min_base_quality
+                )
 
-                # Strand-tag check on the CpG's other base, where the read
-                # covers it (see _STRAND_CONTRADICTION_WARNING_RATE).
+            # Unreadable against this reference: counts towards the
+            # reference check (see _REFERENCE_MISMATCH_WARNING_RATE).
+            mismatch = state == -1
+
+            # The CpG's other base, where the read covers it. A call only
+            # means something if this molecule has a CpG here, so the other
+            # base must be present, adjacent, and the base the reference has.
+            if bases and reference_start <= partner_ref_pos < reference_end:
                 partner_pos = query_position.get(partner_ref_pos)
-                if partner_pos is not None:
-                    strand_checks += 1
-                    if sequence[partner_pos] == contradicting_base:
-                        strand_contradictions += 1
+                if partner_pos is None:
+                    state = -1  # deleted from the read
+                    mismatch = True
+                else:
+                    other = bases[partner_pos]
+                    # Strand-tag check, for reads decoded from their bases
+                    # (see _STRAND_CONTRADICTION_WARNING_RATE).
+                    if xm_tag is None and (
+                        qualities is None or qualities[partner_pos] >= min_base_quality
+                    ):
+                        strand_checks += 1
+                        if other == contradicting_base:
+                            strand_contradictions += 1
+                    if (
+                        query_pos is not None
+                        and partner_pos - query_pos != partner_step
+                    ):
+                        state = -1  # something inserted between the two bases
+                        mismatch = True
+                    elif other != partner_base:
+                        state = -1
+                        # The other strand's conversion product is what a
+                        # wrong strand tag produces, and is reported by the
+                        # strand-tag check; any other base is a mismatch.
+                        if other != contradicting_base:
+                            mismatch = True
+
+            if mismatch:
+                cpgs_mismatched += 1
+            if state == -1:
+                cpgs_not_intact += 1
+            elif low_quality:
+                state = -1
+                cpgs_low_quality += 1
+            read_data.append(state)
 
         # The CpG at index i of the sorted cpg_sites is column col_offset + i.
         read_cols = list(range(col_offset + start_idx, col_offset + end_idx))
-
-        name = aligned_segment.query_name
-        assert name is not None
-        is_read1 = aligned_segment.is_read1
+        cpg_observations += end_idx - start_idx
 
         if debug:
             print(
@@ -1035,10 +1464,9 @@ def _extract_chromosome(
         # ============================================================
         # Add the read's calls to its fragment.
         # ============================================================
-        partner = awaiting_mate.get(name)
-        if partner is not None and partner.is_read1 != is_read1:
+        if partner is not None:
             # Second mate of a fragment that is already queued.
-            del awaiting_mate[name]
+            del awaiting_mate[mate_key]
             partner.awaiting_mate = False
             if not partner.dropped:
                 partner.cols, partner.data = _merge_mate_calls(
@@ -1046,19 +1474,39 @@ def _extract_chromosome(
                 )
                 if partner.tlen == 0:
                     partner.tlen = abs(aligned_segment.template_length)
+                paired_fragments += 1
             continue
 
         # First read of its fragment to contribute calls.
         fragment = _Fragment(
             name, is_read1, read_cols, read_data, abs(aligned_segment.template_length)
         )
+        if mask_3prime:
+            fragment.bottom_strand = bottom_strand
+            fragment.three_prime, fragment.three_prime_exact = _three_prime_end(
+                reference_start,
+                reference_end,
+                aligned_segment.template_length,
+                bool(flag & 0x10),
+                forward_mate_start,
+                bottom_strand,
+            )
+            if not fragment.three_prime_exact:
+                # The mate may already have gone by without opening a
+                # fragment (see ends_seen).
+                seen_end = ends_seen.pop(mate_key, None)
+                if seen_end is not None:
+                    fragment.three_prime = seen_end
+                    fragment.three_prime_exact = True
         pending.append(fragment)
-        if partner is None:
-            mate_start = _mate_start_if_expected(aligned_segment, reference_start)
-            if mate_start is not None:
+        mate_start = _mate_start_if_expected(aligned_segment, reference_start)
+        if mate_start is not None:
+            own_key = (name, reference_start, mate_start)
+            if own_key not in awaiting_mate:
                 fragment.awaiting_mate = True
                 fragment.mate_start = mate_start
-                awaiting_mate[name] = fragment
+                fragment.key = own_key
+                awaiting_mate[own_key] = fragment
 
     # End of the chromosome: nothing more can arrive.
     for fragment in pending:
@@ -1074,6 +1522,14 @@ def _extract_chromosome(
         reads_without_md=reads_without_md,
         strand_checks=strand_checks,
         strand_contradictions=strand_contradictions,
+        improper_pair_reads=improper_pair_reads,
+        reads_used=reads_used,
+        paired_fragments=paired_fragments,
+        cpg_observations=cpg_observations,
+        cpgs_not_intact=cpgs_not_intact,
+        cpgs_mismatched=cpgs_mismatched,
+        cpgs_low_quality=cpgs_low_quality,
+        cpgs_masked=cpgs_masked,
     )
 
 
@@ -1088,6 +1544,10 @@ def extract_methylation_data_from_bam(
     threads: int = 1,
     verbose: bool = False,
     debug: bool = False,
+    min_base_quality: int = 20,
+    mask_3prime: int = 0,
+    keep_improper_pairs: bool = False,
+    allow_length_mismatch: bool = False,
 ) -> ExtractionResult:
     """Extract per-fragment CpG methylation data from a BAM file.
 
@@ -1112,7 +1572,30 @@ def extract_methylation_data_from_bam(
         - Secondary and supplementary alignments are excluded
         - Unmapped reads are excluded (including unmapped mates placed at
           their mapped mate's position)
+        - Paired reads that are not flagged as a proper pair are excluded
+          (unless ``keep_improper_pairs``); single-end reads are kept
         - Reads without a recognised strand tag are excluded
+
+    A call is kept only where it can be trusted; otherwise the CpG is
+    recorded as ``-1`` (the fragment covers it, but there is no usable
+    call):
+        - **Intact CpG.** The read must show a CpG where the reference
+          has one: the methylated or unmethylated base at the base that
+          carries the call, and the reference base at the CpG's other
+          base (where the read covers it), with nothing inserted between
+          them. A molecule carrying a CpG-destroying variant (CpG to
+          TpG/CpA is the commonest human SNP) has no CpG to be
+          methylated, and on one strand such a variant is
+          indistinguishable from an unmethylated CpG unless the other
+          base is checked.
+        - **Base quality.** The base carrying the call must have a Phred
+          quality of at least ``min_base_quality`` (default 20; reads
+          without base qualities are not filtered).
+        - **3' end masking** (opt-in, ``mask_3prime``). End repair fills
+          recessed 3' ends with unmethylated cytosines before
+          conversion, so CpGs near the 3' end of a fragment's original
+          strand read as unmethylated whatever the molecule carried.
+          ``mask_3prime=N`` discards calls within N bases of that end.
 
     Two additional, opt-in filters are available:
         - Non-converted reads (``filter_non_converted``): drops fragments
@@ -1125,10 +1608,11 @@ def extract_methylation_data_from_bam(
           evaluated, are kept, and trigger a ``RuntimeWarning`` reporting
           how many were affected.
         - EM-seq fragment-level over-conversion
-          (``filter_em_overconversion``): drops fragments whose covered
-          CpGs (across both mates) are all called unmethylated, a
-          heuristic for the EM-seq artifact described by Loyfer et al.
-          (bioRxiv 2026.03.24.713040).
+          (``filter_em_overconversion``): drops fragments whose CpG
+          calls (across both mates) are all unmethylated, a heuristic
+          for the EM-seq artifact described by Loyfer et al. (bioRxiv
+          2026.03.24.713040). CpGs without a usable call are left out
+          of that decision.
 
     Every read is decoded at the base that is informative for the strand
     its fragment derives from: the ``C`` of a CpG for a top-strand
@@ -1154,16 +1638,41 @@ def extract_methylation_data_from_bam(
            T=unmethylated(0); bottom strand G=methylated(1),
            A=unmethylated(0); anything else=-1
 
+    In both dialects the intact-CpG, base-quality and 3' end rules above
+    are then applied from the read's own bases and qualities, so the two
+    give identical output for the same reads.
+
     **Strand-tag check.** Decoding from bases relies on the strand tag
     being right. It is checked against the reads themselves: the base of
     a CpG that the tag says cannot be converted (the G for a top-strand
     read, the C for a bottom-strand read) is examined wherever a read
-    covers it. If more than 2% of at least 1,000 such CpGs show the other
-    strand's conversion product, a ``RuntimeWarning`` reports it. That
-    pattern means many reads are mis-tagged — typically a non-directional
-    library aligned by an aligner that assumes a directional one — and
-    that their CpGs have been called methylated regardless of their true
-    state. With ``verbose=True`` the counts are printed for every BAM.
+    covers it with sufficient base quality. If more than 2% of at least
+    1,000 such CpGs show the other strand's conversion product, a
+    ``RuntimeWarning`` reports it. That pattern means many reads are
+    mis-tagged — typically a non-directional library aligned by an
+    aligner that assumes a directional one. In a mis-tagged read every
+    unmethylated CpG fails the intact-CpG rule and is recorded as
+    ``-1``, so only methylated calls survive and methylation is
+    overstated. With ``verbose=True`` the counts are printed for every
+    BAM.
+
+    **Reference check.** The BAM must have been aligned to the reference
+    the CpG index was built from. Chromosomes whose length in the BAM
+    header differs from the reference raise a ``ValueError`` (unless
+    ``allow_length_mismatch``). Independently, if more than 10% of at
+    least 1,000 decoded CpGs mismatch the reference in their read, a
+    ``RuntimeWarning`` reports it: real data stays within a few percent,
+    while a BAM decoded against the wrong reference fails at most CpGs.
+    (CpGs whose only fault is the other strand's conversion product at
+    the CpG's other base are left to the strand-tag check.)
+
+    **Filters that depend on the BAM's own annotations.** The proper-pair
+    and base-quality filters trust the flag and the qualities in the
+    BAM. If more than half of the otherwise usable reads are dropped as
+    improper pairs, or more than half of the otherwise usable calls for
+    low base quality (at least 1,000 in either case), a
+    ``RuntimeWarning`` says so and names the option that turns the
+    filter off.
 
     Args:
         input_bam: Path to the input BAM file. The file must be indexed
@@ -1182,12 +1691,11 @@ def extract_methylation_data_from_bam(
             cytosines required for the non-converted filter to drop a
             read. Matches the NEB ``mark-nonconverted-reads`` default of
             3.
-        filter_em_overconversion: If True, drop fragments whose covered
-            CpGs are all called unmethylated and cover at least
-            ``em_overconversion_min_cpgs`` sites — the Loyfer et al.
-            EM-seq fragment-level over-conversion heuristic. Default
-            False.
-        em_overconversion_min_cpgs: Minimum covered CpG count required
+        filter_em_overconversion: If True, drop fragments whose CpG
+            calls are all unmethylated and number at least
+            ``em_overconversion_min_cpgs`` — the Loyfer et al. EM-seq
+            fragment-level over-conversion heuristic. Default False.
+        em_overconversion_min_cpgs: Minimum number of CpG calls required
             before the over-conversion filter will drop a fragment. Matches
             the regime in Loyfer et al. Fig. 1C where the EM-seq
             artifact is clearly separable from WGBS.
@@ -1209,9 +1717,29 @@ def extract_methylation_data_from_bam(
             count. Useful for monitoring progress on large files.
         debug: If True, print the calls decoded from every read and
             each filter decision. Significantly slower.
+        min_base_quality: Minimum Phred base quality of the base that
+            carries a CpG call. Calls on lower-quality bases are
+            recorded as ``-1``. Default 20; 0 disables the filter. Reads
+            stored without base qualities are never filtered.
+        mask_3prime: Number of bases at the 3' end of each fragment's
+            original strand in which calls are recorded as ``-1``, to
+            remove the end-repair fill-in artifact. The end is the
+            fragment's right-hand end for a top-strand fragment and its
+            left-hand end for a bottom-strand one, taken from the
+            alignment of the mate that starts there; a read whose mate
+            is not available estimates it from the template length, and
+            a single-end read uses its own end. The distance is measured
+            on the aligned fragment, so bases already trimmed from the
+            reads before alignment are not counted. Default 0 (off).
+        keep_improper_pairs: If True, keep paired reads that are not
+            flagged as a proper pair. Default False.
+        allow_length_mismatch: If True, do not require the chromosome
+            lengths in the BAM header to match the reference. Only for
+            a reference that is a deliberately truncated copy of the one
+            the BAM was aligned to. Default False.
 
     Returns:
-        An ExtractionResult named tuple with two fields:
+        An ExtractionResult named tuple with three fields:
 
         - **matrix**: A scipy.sparse.coo_matrix with shape
           (n_fragments, n_cpg_sites) where n_fragments is the number of
@@ -1227,11 +1755,14 @@ def extract_methylation_data_from_bam(
           containing the length of each fragment (the absolute value of
           the BAM TLEN field). Values are 0 for single-end reads or reads
           with unmapped mates.
+        - **stats**: A dict of counts describing what was decoded and
+          what was discarded; see :class:`ExtractionResult`.
 
     Raises:
         FileNotFoundError: If the BAM file index (.bam.bai) is missing.
             The BAM file must be indexed with `samtools index`.
-        ValueError: If ``threads`` is less than 1.
+        ValueError: If ``threads`` is less than 1, or
+            ``min_base_quality`` or ``mask_3prime`` is negative.
 
     Example:
         >>> # xdoctest: +SKIP
@@ -1263,10 +1794,14 @@ def extract_methylation_data_from_bam(
         >>> scipy.sparse.save_npz("sample.methylation.npz", result.matrix)
 
     Note:
-        Rows are ordered by chromosome, in the order chromosomes appear in
-        genome_methylation_embedding.cpg_sites_dict, and within a
-        chromosome by where each fragment's first CpG-covering read
-        appears in the (coordinate-sorted) BAM.
+        Rows are ordered by chromosome, in the order of the embedding's
+        ``expected_chromosomes`` (the same order as the columns), and
+        within a chromosome by where each fragment's first CpG-covering
+        read appears in the (coordinate-sorted) BAM.
+
+        A ``ValueError`` also propagates from the checks on the BAM
+        header: no chromosome name in common with the reference, or a
+        chromosome whose length differs from the reference.
 
     See Also:
         GenomeMethylationEmbedding: For creating the genome embedding.
@@ -1274,6 +1809,10 @@ def extract_methylation_data_from_bam(
     """
     if threads < 1:
         raise ValueError(f"threads must be >= 1, got {threads}")
+    if min_base_quality < 0:
+        raise ValueError(f"min_base_quality must be >= 0, got {min_base_quality}")
+    if mask_3prime < 0:
+        raise ValueError(f"mask_3prime must be >= 0, got {mask_3prime}")
 
     # Open once on the parent side to surface a clean error if the index
     # is missing, to validate chromosome-name overlap, and to read the
@@ -1289,13 +1828,24 @@ def extract_methylation_data_from_bam(
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"Index missing for bam file?: {input_bam}") from exc
 
-    check_chromosome_overlap(
-        bam_references=input_bam_object.references,
-        embedding_chromosomes=list(genome_methylation_embedding.cpg_sites_dict.keys()),
-    )
-    if verbose:
-        print(f"\tTotal reads: {input_bam_object.mapped:,}\n")
-    input_bam_object.close()
+    try:
+        check_chromosome_overlap(
+            bam_references=input_bam_object.references,
+            embedding_chromosomes=list(
+                genome_methylation_embedding.cpg_sites_dict.keys()
+            ),
+        )
+        if not allow_length_mismatch:
+            check_chromosome_lengths(
+                bam_lengths=dict(
+                    zip(input_bam_object.references, input_bam_object.lengths)
+                ),
+                reference_lengths=genome_methylation_embedding.chromosome_lengths,
+            )
+        if verbose:
+            print(f"\tTotal reads: {input_bam_object.mapped:,}\n")
+    finally:
+        input_bam_object.close()
 
     n_cols = genome_methylation_embedding.total_cpg_sites
 
@@ -1306,6 +1856,9 @@ def extract_methylation_data_from_bam(
         non_converted_threshold=non_converted_threshold,
         filter_em_overconversion=filter_em_overconversion,
         em_overconversion_min_cpgs=em_overconversion_min_cpgs,
+        min_base_quality=min_base_quality,
+        mask_3prime=mask_3prime,
+        keep_improper_pairs=keep_improper_pairs,
         debug=debug,
         col_typecode="i" if n_cols <= np.iinfo(np.int32).max else "q",
     )
@@ -1352,9 +1905,19 @@ def extract_methylation_data_from_bam(
     data_chunks: list[np.ndarray] = []
     cpgs_per_fragment_chunks: list[np.ndarray] = []
     tlen_chunks: list[np.ndarray] = []
-    reads_without_md = 0
-    strand_checks = 0
-    strand_contradictions = 0
+    stats = {
+        "reads_used": 0,
+        "reads_dropped_improper_pair": 0,
+        "reads_without_md": 0,
+        "fragments_from_two_mates": 0,
+        "cpg_observations": 0,
+        "cpg_not_intact": 0,
+        "cpg_reference_mismatch": 0,
+        "cpg_low_base_quality": 0,
+        "cpg_masked_3prime": 0,
+        "strand_checks": 0,
+        "strand_contradictions": 0,
+    }
 
     for chrom, chrom_result in tqdm(
         _iter_chrom_results(), total=len(chrom_tasks), disable=not verbose
@@ -1363,9 +1926,17 @@ def extract_methylation_data_from_bam(
             if verbose:
                 tqdm.write(f"Chromosome {chrom} not found in BAM file, skipping.")
             continue
-        reads_without_md += chrom_result.reads_without_md
-        strand_checks += chrom_result.strand_checks
-        strand_contradictions += chrom_result.strand_contradictions
+        stats["reads_used"] += chrom_result.reads_used
+        stats["reads_dropped_improper_pair"] += chrom_result.improper_pair_reads
+        stats["fragments_from_two_mates"] += chrom_result.paired_fragments
+        stats["reads_without_md"] += chrom_result.reads_without_md
+        stats["cpg_observations"] += chrom_result.cpg_observations
+        stats["cpg_not_intact"] += chrom_result.cpgs_not_intact
+        stats["cpg_reference_mismatch"] += chrom_result.cpgs_mismatched
+        stats["cpg_low_base_quality"] += chrom_result.cpgs_low_quality
+        stats["cpg_masked_3prime"] += chrom_result.cpgs_masked
+        stats["strand_checks"] += chrom_result.strand_checks
+        stats["strand_contradictions"] += chrom_result.strand_contradictions
         if len(chrom_result.cpgs_per_fragment) == 0:
             continue
         col_chunks.append(chrom_result.cols)
@@ -1373,12 +1944,87 @@ def extract_methylation_data_from_bam(
         cpgs_per_fragment_chunks.append(chrom_result.cpgs_per_fragment)
         tlen_chunks.append(chrom_result.tlens)
 
+    reads_without_md = stats["reads_without_md"]
+    strand_checks = stats["strand_checks"]
+    strand_contradictions = stats["strand_contradictions"]
+    cpg_observations = stats["cpg_observations"]
+    cpg_not_intact = stats["cpg_not_intact"]
+    cpg_mismatch = stats["cpg_reference_mismatch"]
+
+    if verbose:
+        if stats["reads_dropped_improper_pair"]:
+            print(
+                f"\tImproper pairs: {stats['reads_dropped_improper_pair']:,} "
+                "read(s) dropped."
+            )
+        if cpg_observations:
+            print(
+                f"\tCpG observations: {cpg_observations:,} decoded; "
+                f"{cpg_not_intact:,} ({cpg_not_intact / cpg_observations:.2%}) "
+                "not an intact CpG in the read, "
+                f"{stats['cpg_low_base_quality']:,} below base quality "
+                f"{min_base_quality}; {stats['cpg_masked_3prime']:,} call(s) "
+                "in the masked 3' end of their fragment."
+            )
+
+    improper = stats["reads_dropped_improper_pair"]
+    if (
+        improper >= _FILTER_MAJORITY_MIN_COUNT
+        and improper > _FILTER_MAJORITY_WARNING_RATE * (improper + stats["reads_used"])
+    ):
+        warnings.warn(
+            f"{improper:,} of {improper + stats['reads_used']:,} otherwise usable "
+            f"reads ({improper / (improper + stats['reads_used']):.1%}) in "
+            f"{input_bam} are paired but not flagged as a proper pair, and were "
+            "dropped. Ordinary libraries lose a few percent this way. If the "
+            "aligner or a later tool does not set the proper-pair flag on this "
+            "data, keep these reads with keep_improper_pairs "
+            "(--keep-improper-pairs).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    low_quality = stats["cpg_low_base_quality"]
+    readable = cpg_observations - cpg_not_intact
+    if (
+        low_quality >= _FILTER_MAJORITY_MIN_COUNT
+        and low_quality > _FILTER_MAJORITY_WARNING_RATE * readable
+    ):
+        warnings.warn(
+            f"{low_quality:,} of {readable:,} CpG calls "
+            f"({low_quality / readable:.1%}) in {input_bam} sit on bases below "
+            f"the minimum base quality of {min_base_quality}, and were recorded "
+            "as no data. Ordinary data loses a few percent this way. If this "
+            "BAM carries placeholder base qualities, turn the filter off with "
+            "min_base_quality=0 (--min-base-quality 0).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     if reads_without_md:
         warnings.warn(
             f"{reads_without_md:,} read(s) in {input_bam} have no MD tag, so the "
             "non-converted filter could not evaluate them and they were kept. "
             "Add MD tags (e.g. with `samtools calmd`) to apply the filter to "
             "these reads.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    if (
+        cpg_observations >= _REFERENCE_MISMATCH_MIN_CPGS
+        and cpg_mismatch > _REFERENCE_MISMATCH_WARNING_RATE * cpg_observations
+    ):
+        warnings.warn(
+            f"{cpg_mismatch:,} of {cpg_observations:,} CpGs "
+            f"({cpg_mismatch / cpg_observations:.1%}) covered by reads in "
+            f"{input_bam} do not match the reference: the read shows something "
+            "other than a CpG there. Sequencing errors and genetic variants "
+            "account for a percent or two. A rate this high suggests the BAM "
+            "was not aligned to the reference FASTA provided (the positions "
+            "taken for CpGs are then not CpGs in the reads), in which case "
+            "this output is meaningless; check that the reference is the one "
+            "used for alignment.",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -1403,11 +2049,13 @@ def extract_methylation_data_from_bam(
                 "(well under 1%). A rate this high means the strand tags do "
                 "not describe many of the reads, as happens when a "
                 "non-directional library is aligned with an aligner that "
-                "assumes a directional one (such as bwa-meth). CpGs in those "
-                "reads are called methylated whatever their true state, so "
-                "this output should not be trusted; re-align with a tool that "
+                "assumes a directional one (such as bwa-meth). In those reads "
+                "only methylated CpGs are called (unmethylated ones are "
+                "recorded as no data), so methylation is overstated and this "
+                "output should not be trusted; re-align with a tool that "
                 "models non-directional libraries (for example Bismark with "
-                "--non_directional).",
+                "--non_directional). A BAM decoded against a reference it was "
+                "not aligned to also produces this pattern.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -1454,4 +2102,4 @@ def extract_methylation_data_from_bam(
 
     assert sparse_matrix.shape[1] == n_cols
 
-    return ExtractionResult(matrix=sparse_matrix, tlen=tlen_array)
+    return ExtractionResult(matrix=sparse_matrix, tlen=tlen_array, stats=stats)

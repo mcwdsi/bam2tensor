@@ -188,6 +188,7 @@ def test_main_writes_metadata(tmp_path) -> None:
             str(tmp_path / "test.bam"),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",

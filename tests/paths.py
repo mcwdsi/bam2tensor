@@ -9,9 +9,13 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 
-# Real aligner output (Biscuit, hg38 coordinates). Only a handful of its reads
-# overlap the 700 kb test FASTA; see ``simulate.py`` for a fixture whose reads
-# actually cover it.
+# Real aligner output: experimental EM-seq aligned to hg38 by bwa-meth, all of
+# it on chr1. It was not aligned to the 700 kb test FASTA below, so only a
+# handful of its reads fall within that FASTA at all, and those are decoded
+# against the wrong sequence: tests that pair the two only exercise the
+# plumbing, and must pass ``allow_length_mismatch=True`` /
+# ``--allow-length-mismatch`` to get past the reference check. See
+# ``simulate.py`` for a fixture whose reads really belong to the test FASTA.
 TEST_BAM = str(TESTS_DIR / "test.bam")
 TEST_BAM_INDEX = str(TESTS_DIR / "test.bam.bai")
 

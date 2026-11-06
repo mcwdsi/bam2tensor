@@ -39,6 +39,7 @@
   - [Custom Output Directory](#custom-output-directory)
   - [Using a Custom Genome](#using-a-custom-genome)
   - [Command-Line Options](#command-line-options)
+- [Which Reads and Calls Are Used](#which-reads-and-calls-are-used)
 - [Filtering Conversion Errors](#filtering-conversion-errors)
 - [Inspecting Output Files](#inspecting-output-files)
 - [Output Data Structure](#output-data-structure)
@@ -68,7 +69,10 @@
 - **Efficient Algorithm**: Linear-scan algorithm ensures minimal memory usage
 - **Batch Processing**: Process multiple BAM files with directory recursion
 - **Caching**: CpG site indexing is cached to accelerate repeated runs on the same genome
-- **Quality Filtering**: Configurable mapping quality thresholds
+- **Quality Filtering**: Configurable mapping-quality and base-quality thresholds; improper pairs are dropped
+- **Calls Only Where the Read Shows a CpG**: A call is kept only if the read shows an intact CpG, so a molecule carrying a CpG-destroying variant is not counted as unmethylated
+- **End-Repair Masking**: Optional masking of the 3' end of each fragment, where end repair fills in unmethylated cytosines
+- **Reference Check**: Refuses a BAM whose chromosome lengths differ from the reference, and warns when reads do not match it
 - **Fragment Length**: Stores each fragment's length (BAM TLEN) alongside the methylation tensor for joint fragment-methylation analysis
 - **Conversion-Error Filters**: Optional filters for incomplete bisulfite/EM-seq conversion (ported from `nebiolabs/mark-nonconverted-reads`) and EM-seq fragment-level over-conversion (Loyfer et al. 2026)
 
@@ -172,7 +176,7 @@ bam2tensor \
 
 Each BAM file will generate a corresponding `.methylation.npz` file in the same location.
 
-If a BAM cannot be processed (for example its index is missing, or its chromosome names do not match the reference), bam2tensor reports the error, carries on with the remaining files, and lists the failures in the final summary. The exit status is `1` if any BAM failed and `0` otherwise, so schedulers and pipelines can detect a partial failure.
+If a BAM cannot be processed (for example its index is missing, or its chromosome names or lengths do not match the reference), bam2tensor reports the error, carries on with the remaining files, and lists the failures in the final summary. The exit status is `1` if any BAM failed and `0` otherwise, so schedulers and pipelines can detect a partial failure.
 
 Each output file is written under a temporary name and renamed into place once it is complete. An interrupted run therefore never leaves a partial `.methylation.npz` behind, and re-running the same command (without `--overwrite`) safely picks up where it stopped: finished files are skipped, unfinished ones are redone.
 
@@ -189,6 +193,8 @@ bam2tensor \
 ```
 
 This is useful on HPC clusters where input directories may be read-only or on slow shared storage.
+
+Only the BAM's file name is kept in the output directory, so two BAMs with the same name in different subdirectories (`batch1/sample.bam`, `batch2/sample.bam`) would share one output file. bam2tensor refuses such a run before doing any work, rather than silently skipping or overwriting one of them. Rename the BAMs, give each directory its own `--output-dir`, or leave `--output-dir` out so that each output is written next to its BAM.
 
 ### Using a Custom Genome
 
@@ -231,8 +237,29 @@ Options:
                                   chromosomes.
   --reference-fasta FILE          Reference genome fasta file (critical to
                                   determine CpG sites).
-  --quality-limit INTEGER         Quality filter for aligned reads (default =
-                                  20)
+  --quality-limit INTEGER         Minimum mapping quality (MAPQ) of a read
+                                  (default = 20).
+  --min-base-quality INTEGER RANGE
+                                  Minimum Phred quality of the base that
+                                  carries a CpG call (default = 20). Calls on
+                                  lower-quality bases are stored as -1 (no
+                                  usable call). Use 0 to turn the filter off.
+                                  [x>=0]
+  --mask-3prime INTEGER RANGE     Store -1 (no usable call) for CpGs within
+                                  this many bases of the 3' end of each
+                                  fragment's original strand, where end repair
+                                  fills in unmethylated cytosines before
+                                  conversion (default = 0, off). Leave off if
+                                  the reads were already trimmed for this
+                                  before alignment.  [x>=0]
+  --keep-improper-pairs           Keep paired reads that the aligner did not
+                                  flag as a proper pair. By default they are
+                                  dropped.
+  --allow-length-mismatch         Do not require chromosome lengths in the BAM
+                                  header to match the reference FASTA. Only
+                                  for a reference that is a deliberately
+                                  truncated copy of the one the BAM was
+                                  aligned to.
   --filter-non-converted          Drop fragments in which a read has >= --non-
                                   converted-threshold retained non-CpG
                                   cytosines, the signature of incomplete
@@ -244,15 +271,16 @@ Options:
                                   in a read for its fragment to be dropped
                                   (default = 3, matches NEB mark-nonconverted-
                                   reads).
-  --filter-em-overconversion      Drop EM-seq fragments whose covered CpGs are
-                                  all called unmethylated and cover at least
-                                  --em-overconversion-min-cpgs sites
-                                  (heuristic for the fragment-level over-
-                                  conversion artifact described in Loyfer et
-                                  al. bioRxiv 2026.03.24.713040). Default:
+  --filter-em-overconversion      Drop EM-seq fragments whose CpG calls are
+                                  all unmethylated and number at least --em-
+                                  overconversion-min-cpgs (heuristic for the
+                                  fragment-level over-conversion artifact
+                                  described in Loyfer et al. bioRxiv
+                                  2026.03.24.713040). CpGs without a usable
+                                  call are left out of the decision. Default:
                                   off.
   --em-overconversion-min-cpgs INTEGER
-                                  Minimum covered CpG count required before
+                                  Minimum number of CpG calls required before
                                   the EM over-conversion filter will drop a
                                   fragment (default = 3).
   --threads INTEGER               Number of worker processes for per-
@@ -287,10 +315,14 @@ Options:
 | `--expected-chromosomes` | Comma-separated list of chromosome names to process. Chromosomes not in this list are skipped. Defaults to human autosomes + sex chromosomes. |
 | `--reference-fasta` | Path to the reference genome FASTA file. Must match the genome used for alignment. |
 | `--quality-limit` | Minimum mapping quality score (MAPQ) for reads to be included. Default is 20. |
+| `--min-base-quality` | Minimum Phred quality of the base that carries a CpG call. Calls on lower-quality bases are stored as `-1`. Default is 20; `0` turns the filter off. See [Which Reads and Calls Are Used](#which-reads-and-calls-are-used). |
+| `--mask-3prime` | Store `-1` for CpGs within this many bases of the 3' end of each fragment's original strand, to remove the end-repair artifact. Default is 0 (off). See [Masking the 3' End of Fragments](#masking-the-3-end-of-fragments). |
+| `--keep-improper-pairs` | Keep paired reads that the aligner did not flag as a proper pair. By default they are dropped. |
+| `--allow-length-mismatch` | Do not require the chromosome lengths in the BAM header to match the reference FASTA. See [Reference Check](#reference-check). |
 | `--filter-non-converted` | Drop fragments in which a read has at least `--non-converted-threshold` retained non-CpG cytosines (incomplete conversion). See [Filtering Conversion Errors](#filtering-conversion-errors). |
 | `--non-converted-threshold` | Threshold for the non-converted filter. Default is 3. |
-| `--filter-em-overconversion` | Drop EM-seq fragments whose covered CpGs are all unmethylated and cover ≥ `--em-overconversion-min-cpgs` sites. See [Filtering Conversion Errors](#filtering-conversion-errors). |
-| `--em-overconversion-min-cpgs` | Minimum covered CpG count before the EM over-conversion filter will drop a fragment. Default is 3. |
+| `--filter-em-overconversion` | Drop EM-seq fragments whose CpG calls are all unmethylated and number ≥ `--em-overconversion-min-cpgs`. See [Filtering Conversion Errors](#filtering-conversion-errors). |
+| `--em-overconversion-min-cpgs` | Minimum number of CpG calls before the EM over-conversion filter will drop a fragment. Default is 3. |
 | `--threads` | Number of worker processes for per-chromosome extraction. Default is 1 (single process). Output is bitwise-identical regardless of the value. See [Performance Tips](#performance-tips). |
 | `--verbose` | Enable detailed progress output including per-chromosome progress bars. |
 | `--skip-cache` | Force regeneration of CpG site cache. Useful if you've modified the reference or chromosome list. |
@@ -299,6 +331,42 @@ Options:
 | `--output-dir` | Write `.methylation.npz` files to this directory instead of next to the input BAMs. Created automatically if it doesn't exist. |
 | `--download-reference` | Download and cache a known reference genome. Choices: `hg38`, `hg19`, `mm10`, `T2T-CHM13`. Replaces `--reference-fasta`. |
 | `--list-genomes` | List available reference genomes for `--download-reference` and exit. |
+
+## Which Reads and Calls Are Used
+
+bam2tensor reads the BAM as it is: it does not trim reads, remove duplicates or re-align. It uses the reads the aligner and your pipeline have flagged as usable, and keeps a call only where the read itself supports it. Every setting below is recorded in the output's `metadata.json`, together with counts of what it discarded.
+
+### Reads
+
+A read is skipped if it is unmapped, secondary, supplementary, QC-failed, flagged as a duplicate, or below `--quality-limit` (MAPQ, default 20). Duplicates are only skipped if they are *flagged*: run a duplicate marker (`samtools markdup`, Picard, `dupsifter`) before bam2tensor if you want them gone.
+
+**Improper pairs are dropped.** A paired read that the aligner did not flag as a proper pair has a mate that is unmapped, on another chromosome, in the wrong orientation or implausibly far away. Such pairs are enriched for chimeric and mis-aligned molecules. Both mates are skipped; `--keep-improper-pairs` keeps them. Single-end reads are unaffected.
+
+Both this filter and the base-quality filter below trust what the BAM says about itself. If more than half of the otherwise usable reads are dropped as improper pairs (an aligner that never sets the flag), or more than half of the calls for low base quality (placeholder qualities), the BAM's report carries a warning naming the option that turns the filter off.
+
+### Calls
+
+A CpG that a fragment covers is stored as `1` or `0` only if the call can be trusted. Otherwise it is stored as `-1`: the fragment covers the CpG, but there is no usable call.
+
+- **The read must show a CpG.** The base that carries the call must be the methylated or unmethylated base, and the CpG's *other* base (the `G` for a top-strand read, the `C` for a bottom-strand read), where the read covers it, must read as the reference has it, immediately next to the first. A molecule on which the CpG has mutated to CpA has no CpG to be methylated; its lone `C` is converted like any other non-CpG cytosine, so a top-strand read shows `TA` there, which would otherwise be counted as an unmethylated CpG. The same holds, mirrored, for a bottom-strand read of a TpG molecule. (A variant on the base that carries the call cannot be told from a conversion in a single read: a top-strand read of a TpG molecule looks exactly like an unmethylated CpG. Exclude known CpG-destroying SNPs downstream if that matters to you.)
+- **The base must be of sufficient quality.** The base that carries the call needs a Phred quality of at least `--min-base-quality` (default 20). Where the two mates overlap, a good call from one mate stands in for a low-quality one from the other. BAMs that store no base qualities are not filtered.
+
+These rules are applied from each read's own bases and qualities for every aligner, including Bismark, whose `XM` string takes CpG context from the reference rather than from the read.
+
+### Masking the 3' End of Fragments
+
+Library preparation repairs the ends of each fragment before conversion: a recessed 3' end is filled in by a polymerase, using unmethylated cytosines. Those cytosines are then converted like any other unmethylated cytosine, so CpGs in the filled-in stretch read as unmethylated whatever the original molecule carried. The effect is strongest in the last few bases and is most pronounced for short fragments with ragged ends, such as cell-free DNA. It shows as a drop in methylation at the start of read 2 in an M-bias plot.
+
+`--mask-3prime N` stores `-1` for calls within `N` bases of the 3' end of the strand each fragment derives from: the fragment's right-hand end for a top-strand fragment, its left-hand end for a bottom-strand one. The end is taken from the alignment of the mate that starts there, so both mates are masked alike and the result does not depend on how the aligner defines the template length. A read whose mate is not available estimates the end from the template length; a single-end read uses its own end.
+
+It is **off by default**, because many pipelines already deal with this before bam2tensor sees the data (for example by clipping the 5' end of read 2 with `trim_galore --clip_R2` or `fastp --trim_front2`), and bases removed before alignment are not in the BAM to be counted again. If your reads were not trimmed for it, inspect an M-bias plot (Bismark's `bismark_methylation_extractor --mbias_only`, `MethylDackel mbias`) and choose `N` to cover the depressed stretch. The mask can also be combined with upstream trimming: it is measured from the end of the fragment as aligned. The 5' end of the fragment is not affected by fill-in and is never masked.
+
+### Reference Check
+
+The BAM must have been aligned to the reference FASTA that bam2tensor is given: CpG positions are taken from the FASTA, and are meaningless against another assembly.
+
+- A BAM whose header gives a chromosome a different length from the FASTA (hg19 against hg38, for instance) is refused, and reported as an error for that BAM. `--allow-length-mismatch` turns this off; it is only appropriate for a FASTA that is a deliberately truncated copy of the alignment reference.
+- Independently, bam2tensor counts the CpGs at which a read does not match the reference (something other than a CpG where the reference has one). Sequencing errors and genetic variants account for a percent or two. If more than 10% of at least 1,000 CpGs mismatch, the BAM's report carries a warning that it was probably not aligned to this reference.
 
 ## Filtering Conversion Errors
 
@@ -309,13 +377,13 @@ Bisulfite and EM-seq library preparation can produce two kinds of conversion err
 Ports the logic of [nebiolabs/mark-nonconverted-reads](https://github.com/nebiolabs/mark-nonconverted-reads). A read is flagged if it carries at least `--non-converted-threshold` (default 3) retained non-CpG cytosines, a signature of incomplete bisulfite or EM-seq conversion. The threshold is applied to each read separately, as in the NEB tool; because incomplete conversion is a property of the molecule, a flagged read removes its whole fragment, mate included.
 
 - **Bismark BAMs**: counted directly from the `XM` tag's uppercase `H`/`X`/`U` characters (retained cytosines in CHH/CHG/unknown contexts).
-- **Biscuit / bwameth / gem3 BAMs**: counted by comparing the read to the reference via the `MD` tag (using pysam's `get_aligned_pairs(with_seq=True)`). SNPs — where the read's retained `C` sits over a reference base that isn't `C` — are excluded from the count, matching NEB's reference-validation step. No separate FASTA reload is required. Reads **without** an `MD` tag cannot be evaluated: they are kept, and bam2tensor prints a warning with the number of affected reads. If your aligner did not write `MD` tags, add them first with `samtools calmd`.
+- **Biscuit / bwameth / gem3 BAMs**: counted by comparing the read to the reference via the `MD` tag (using pysam's `get_aligned_pairs(with_seq=True)`). SNPs — where the read's retained `C` sits over a reference base that isn't `C` — are excluded from the count, matching NEB's reference-validation step. No separate FASTA reload is required. Reads **without** an `MD` tag cannot be evaluated: they are kept, and bam2tensor prints a warning with the number of affected reads. If your aligner did not write `MD` tags, add them first with `samtools calmd`. gem3 does not write `MD` for bisulfite alignments, so its BAMs always need this step for the filter to do anything.
 
   Cytosines in CpG context are exempt, as in the NEB tool; which ones those are is taken from the CpG index, so it is exact even for a CpG cut by the end of a read. The count is otherwise only as good as the `MD` tag. bwa-meth writes `MD` relative to its converted reference: for directional libraries this gives the same count as checking against the FASTA, except that a read `C` over a reference `T` (a SNP that conversion makes invisible) is counted as retained. For a non-directional library aligned with bwa-meth the tag no longer describes the read, and retained cytosines are undercounted.
 
 ### `--filter-em-overconversion` — EM-seq fragment-level over-conversion
 
-A heuristic inspired by [Loyfer et al. (bioRxiv 2026.03.24.713040)](https://www.biorxiv.org/content/10.64898/2026.03.24.713040v1). That paper shows EM-seq reproducibly produces ~1–2.5% of multi-CpG fragments that appear fully unmethylated across every covered CpG — a fragment-level artifact absent from WGBS and Oxford Nanopore. This filter drops any fragment whose covered CpGs — across both mates — are **all** called unmethylated *and* cover at least `--em-overconversion-min-cpgs` sites (default 3, the regime where the EM-seq artifact is clearly separable from WGBS in Loyfer et al. Fig. 1C).
+A heuristic inspired by [Loyfer et al. (bioRxiv 2026.03.24.713040)](https://www.biorxiv.org/content/10.64898/2026.03.24.713040v1). That paper shows EM-seq reproducibly produces ~1–2.5% of multi-CpG fragments that appear fully unmethylated across every covered CpG — a fragment-level artifact absent from WGBS and Oxford Nanopore. This filter drops any fragment whose CpG calls — across both mates — are **all** unmethylated *and* number at least `--em-overconversion-min-cpgs` (default 3, the regime where the EM-seq artifact is clearly separable from WGBS in Loyfer et al. Fig. 1C). CpGs stored as `-1` are left out of the decision: they neither count towards the minimum nor protect a fragment whose calls are otherwise all unmethylated.
 
 The filter is a blunt instrument: it will also drop genuinely fully-unmethylated biological fragments at unmethylated markers. Enable it only when your downstream application (e.g., cfDNA deconvolution at constitutively methylated loci) can tolerate that trade-off.
 
@@ -335,6 +403,10 @@ Filter parameters and enabled state are written to the output `metadata.json`:
 ```json
 {
     "filters": {
+        "min_mapping_quality": 20,
+        "min_base_quality": 20,
+        "mask_3prime": 0,
+        "keep_improper_pairs": false,
         "non_converted_reads": {"enabled": true, "threshold": 3},
         "em_overconversion": {"enabled": true, "min_cpgs": 3}
     }
@@ -356,12 +428,12 @@ The two filters differ in whether they can be replayed downstream without the so
       # The calls stored for this fragment. Do not densify the row: an
       # uncovered CpG would then look the same as an unmethylated one.
       calls = mat.data[mat.indptr[i]:mat.indptr[i + 1]]
-      is_overconv = len(calls) >= min_cpgs and (calls == 0).all()
+      is_overconv = (calls == 0).sum() >= min_cpgs and not (calls == 1).any()
       if not is_overconv:
           kept_rows.append(i)
   ```
 
-  As in bam2tensor itself, a `-1` (no data) call counts towards the number of covered CpGs and prevents a fragment from being flagged.
+  As in bam2tensor itself, a `-1` (no usable call) entry is left out: it neither counts towards the minimum nor prevents a fragment from being flagged.
 
 - **`--filter-non-converted` is *not* reproducible from the `.npz` alone.** It relies on retained non-CpG cytosines (or Bismark's `H`/`X`/`U`), which are never written to the matrix. If you need this filter, apply it at extraction time (or re-run bam2tensor against the original BAM).
 
@@ -378,15 +450,18 @@ sample.methylation.npz
   CpG sites:       28,217,448
   Data points:     12,847,322 (sparsity: 99.97%)
   Fragment len:    median 167, mean 182, range [50, 600]
-  Filters:         non-converted (>= 3 non-CpG Cs)
+  Filters:         MAPQ >= 20
+                   base quality >= 20
+                   improper pairs dropped
+                   non-converted (>= 3 non-CpG Cs)
                    EM over-conversion (all-unmethylated, >= 3 CpGs)
   Format:          v2 (one row per fragment)
   CpG index CRC32: a1b2c3d4
-  bam2tensor:      v2.8
+  bam2tensor:      v3.0
   File size:       14.2 MB
 ```
 
-When no filters were applied, the line reads `Filters:         none`. Files produced by bam2tensor versions older than v2.5 omit the line entirely. The `Format` line shows the [output format version](#output-format-versions); files written before fragment rows were introduced are reported as `v1 (one row per read)` and their row count is labelled `Reads`.
+Files written before v3.0 do not record the mapping-quality, base-quality and pair settings; for those, the line lists only the opt-in conversion filters, or reads `Filters:         none`. Files produced by bam2tensor versions older than v2.5 omit the line entirely. The `Format` line shows the [output format version](#output-format-versions); files written before fragment rows were introduced are reported as `v1 (one row per read)` and their row count is labelled `Reads`.
 
 You can pass multiple files at once:
 
@@ -396,14 +471,16 @@ $ bam2tensor-inspect *.methylation.npz
 
 This works on files produced by older versions of bam2tensor too (metadata fields will be omitted).
 
+A file that cannot be read (corrupt or truncated) is reported on standard error, the remaining files are still inspected, and the exit status is `1`, so the command can be used to validate outputs in a pipeline.
+
 ## Output Data Structure
 
 bam2tensor generates one `.methylation.npz` file per input BAM file. Each file contains a SciPy sparse [COO matrix] (`scipy.sparse.coo_matrix`) with the following structure:
 
 | Dimension | Represents |
 |-----------|------------|
-| **Rows** | Sequenced DNA fragments: the two mates of a read pair combined, or a single read. Ordered by chromosome, then by where each fragment first appears in the BAM. See [How Reads Become Rows](#how-reads-become-rows). |
-| **Columns** | CpG sites from the reference genome, ordered by genomic position across all chromosomes (chr1, chr2, ..., chrX, chrY). Column `i` maps to the `i`-th CpG dinucleotide in the reference FASTA. |
+| **Rows** | Sequenced DNA fragments: the two mates of a read pair combined, or a single read. Ordered by chromosome (in `--expected-chromosomes` order, like the columns), then by where each fragment first appears in the BAM. See [How Reads Become Rows](#how-reads-become-rows). |
+| **Columns** | CpG sites from the reference genome, ordered by chromosome (in `--expected-chromosomes` order) and then by genomic position. Column `i` maps to the `i`-th CpG dinucleotide of those chromosomes in the reference FASTA. |
 
 The **column dimension is determined entirely by the reference genome**: it equals the total number of CpG sites across all `--expected-chromosomes`. For example, hg38 with default chromosomes has ~28 million CpG columns. To map column indices back to genomic coordinates (e.g., column 12345 → chr1:29503), use the `GenomeMethylationEmbedding` class with the same reference FASTA and chromosome list (see [Working with Genomic Coordinates](#working-with-genomic-coordinates) below).
 
@@ -413,7 +490,7 @@ The **column dimension is determined entirely by the reference genome**: it equa
 |-------|---------|
 | `1` | Methylated (cytosine preserved as C after bisulfite/enzymatic conversion) |
 | `0` | Unmethylated (cytosine converted to T by bisulfite/enzymatic treatment) |
-| `-1` | No data (indel, SNV, or other non-C/T base at a CpG position, or the two mates of a pair disagreeing) |
+| `-1` | Covered, but no usable call: the read does not show an intact CpG there (an indel, SNV or other unexpected base at either base of the CpG), the base carrying the call is below `--min-base-quality`, the CpG lies in the masked 3' end of the fragment (`--mask-3prime`), or the two mates of a pair disagree. See [Which Reads and Calls Are Used](#which-reads-and-calls-are-used). |
 
 Note: The matrix uses SciPy's COO sparse format. Unmethylated sites (value `0`) **are** stored as explicit entries. CpGs a fragment does not cover are simply absent from the matrix (an implicit zero, which is distinct from the explicit `0` = unmethylated). Work with the stored entries (`.data`, `.row`, `.col`, or the `data`/`indptr` of a CSR/CSC copy): a dense copy made with `.toarray()` can no longer tell "unmethylated" from "not covered", and SciPy operations that drop explicit zeros (such as `eliminate_zeros()`) discard the unmethylated calls.
 
@@ -421,10 +498,10 @@ Note: The matrix uses SciPy's COO sparse format. Unmethylated sites (value `0`) 
 
 Each row is one sequenced DNA fragment — one molecule.
 
-- **Mates are combined.** The two mates of a read pair are copies of the same molecule, so their calls go into a single row. Mates are combined when both pass the read filters (MAPQ, duplicate, QC-fail, secondary/supplementary, unmapped) and map to the same chromosome within 100 kb of each other. A single-end read, or a read whose mate is filtered out, absent, or elsewhere, is a row on its own.
+- **Mates are combined.** The two mates of a read pair are copies of the same molecule, so their calls go into a single row. Mates are combined when both pass the read filters (MAPQ, duplicate, QC-fail, secondary/supplementary, unmapped, proper pair) and map to the same chromosome within 100 kb of each other. They are recognised by their shared read name together with their positions: each mate's record must point at where the other one starts, so two unrelated pairs that happen to share a name are not mixed up. A single-end read, or a read whose mate is filtered out, absent, or elsewhere, is a row on its own.
 - **A CpG covered by both mates is recorded once.** If the mates agree, that call is stored. If only one mate has a call, that call is stored. If one says methylated and the other unmethylated, one of them is a sequencing error and there is no telling which, so the CpG is stored as `-1`.
-- **Both strands are used.** A fragment derives from either the top or the bottom strand of the original DNA, and both of its mates report on that strand. BAM stores every read in top-strand orientation, so a top-strand fragment carries the call for a CpG on its `C` (`C` = methylated, `T` = unmethylated) and a bottom-strand fragment carries it on the `G` one base to the right (`G` = methylated, `A` = unmethylated). Each read is decoded on whichever base is informative for its fragment's strand, as given by the aligner's strand tag (see [Supported Aligners](#supported-aligners)) — not by the read's own alignment orientation.
-- **Row order.** Rows are grouped by chromosome and, within a chromosome, ordered by where each fragment's first CpG-covering read appears in the coordinate-sorted BAM. Within a row, CpGs are in ascending column order.
+- **Both strands are used.** A fragment derives from either the top or the bottom strand of the original DNA, and both mates of a proper pair report on that strand. BAM stores every read in top-strand orientation, so a top-strand fragment carries the call for a CpG on its `C` (`C` = methylated, `T` = unmethylated) and a bottom-strand fragment carries it on the `G` one base to the right (`G` = methylated, `A` = unmethylated). Each read is decoded on whichever base is informative for its fragment's strand, as given by the aligner's strand tag (see [Supported Aligners](#supported-aligners)) — not by the read's own alignment orientation.
+- **Row order.** Rows are grouped by chromosome, in the order of `--expected-chromosomes` (the same order as the columns, whatever the order of the sequences in the FASTA), and, within a chromosome, ordered by where each fragment's first CpG-covering read appears in the coordinate-sorted BAM. Within a row, CpGs are in ascending column order.
 
 Fragments that cover no CpG produce no row.
 
@@ -435,6 +512,7 @@ Each `.methylation.npz` file includes a `tlen.npy` entry inside the ZIP archive 
 - One `int32` value per fragment (row), in the same order as the sparse matrix rows
 - Non-negative: the BAM's sign only says which mate is leftmost, which has no meaning for a whole fragment
 - Zero for single-end reads or reads with unmapped mates
+- Taken from the BAM as the aligner wrote it. Aligners agree for ordinary pairs. For a pair whose mates extend past each other (a fragment shorter than the reads, sequenced into the adapter and not trimmed), Bismark reports the outer span of the two alignments and bwa the distance between their starting ends, which is the length of the fragment.
 
 ```python
 from bam2tensor.metadata import read_npz_tlen
@@ -462,7 +540,25 @@ Each `.methylation.npz` file includes a `metadata.json` entry inside the ZIP arc
 | `expected_chromosomes` | List of chromosomes included in the column mapping |
 | `total_cpg_sites` | Total number of CpG columns in the matrix |
 | `cpg_index_crc32` | CRC32 checksum of the CpG site positions (verifies identical column semantics) |
-| `filters` | Nested dict recording which opt-in conversion-error filters were applied (`non_converted_reads`, `em_overconversion`) and their parameters. See [Filtering Conversion Errors](#filtering-conversion-errors). Added in v2.5. |
+| `input_bam` | File name of the BAM the output was extracted from. Added in v3.0. |
+| `aligner` | The aligner dialect detected from the BAM's tags. Added in v3.0. |
+| `filters` | Nested dict recording the settings used: `min_mapping_quality`, `min_base_quality`, `mask_3prime`, `keep_improper_pairs` (added in v3.0), and the opt-in conversion-error filters `non_converted_reads` and `em_overconversion` with their parameters (added in v2.5). See [Which Reads and Calls Are Used](#which-reads-and-calls-are-used) and [Filtering Conversion Errors](#filtering-conversion-errors). |
+| `extraction_stats` | Counts of what the extraction saw and discarded, for quality control. Added in v3.0. See below. |
+
+`extraction_stats` holds:
+
+| Count | Meaning |
+|-------|---------|
+| `reads_used` | Reads that passed every read filter (mapping quality, flags, proper pair), whether or not they cover a CpG |
+| `reads_dropped_improper_pair` | Reads skipped because they are paired but not flagged as a proper pair |
+| `reads_without_md` | Reads the non-converted filter could not evaluate for lack of an `MD` tag |
+| `fragments_from_two_mates` | Fragments in which the calls of two mates were combined (counted before the fragment-level filters) |
+| `cpg_observations` | CpGs decoded, counted per read (before the two mates of a pair are combined) |
+| `cpg_not_intact` | Observations stored as `-1` because the read does not show an intact CpG |
+| `cpg_reference_mismatch` | How many of those disagree with the reference in a way a wrong strand tag cannot explain (the count behind the [reference check](#reference-check)) |
+| `cpg_low_base_quality` | Observations stored as `-1` because of low base quality |
+| `cpg_masked_3prime` | Calls stored as `-1` by `--mask-3prime` (counted per fragment, after mates are combined) |
+| `strand_checks`, `strand_contradictions` | The [strand-tag check](#supported-aligners): CpGs examined, and how many contradict their read's strand tag |
 
 This metadata is ignored by `scipy.sparse.load_npz`, so existing code continues to work. To read it:
 
@@ -482,7 +578,7 @@ if meta is not None:
 
 | `format_version` | Rows | Notes |
 |---|---|---|
-| `2` | One per **fragment** (`"row_unit": "fragment"`) | Mates combined; every read decoded on its informative base, so both strands are represented for every aligner. `tlen` is the fragment length. |
+| `2` | One per **fragment** (`"row_unit": "fragment"`) | Releases from 3.0. Mates combined; every read decoded on its informative base, so both strands are represented for every aligner. A call is kept only where the read shows an intact CpG on a base of sufficient quality; `-1` means covered without a usable call. Rows follow the order of `expected_chromosomes`. `tlen` is the fragment length. |
 | absent (`1`) | One per **read** | Releases up to and including 2.8. For Bismark BAMs, both mates were separate rows and calls from bottom-strand alignments were stored as `-1`. For Biscuit, bwameth and gem3 BAMs, only read 1 of each pair was used. `tlen` is the signed BAM TLEN of each read. |
 
 ```python
@@ -630,13 +726,13 @@ bam2tensor supports BAM files from bisulfite-aware and EM-seq-aware aligners tha
 | [bwameth](https://github.com/brentp/bwameth) | `YD` | `f` (top strand, OT/CTOT), `r` (bottom strand, OB/CTOB) |
 | [gem3](https://github.com/gemtools/gemtools) / [Blueprint](http://www.blueprint-epigenome.eu/) | `XB` | `C` (top strand), `G` (bottom strand) |
 
-The strand tag says which strand of the original DNA a fragment derives from, and so which base carries the call for each CpG (see [How Reads Become Rows](#how-reads-become-rows)). Both mates of a pair carry the same value. For Biscuit, bwameth and gem3 the call is read from the base itself; for Bismark it is read from the `XM` string, which Bismark writes on the `C` of the CpG for top-strand alignments and on the `G` for bottom-strand ones. If a Bismark-style BAM has no `XG` tag, the strand is inferred from the bases the calls sit on.
+The strand tag says which strand of the original DNA a fragment derives from, and so which base carries the call for each CpG (see [How Reads Become Rows](#how-reads-become-rows)). Both mates of a proper pair carry the same value. (In real bwa-meth output a fraction of a percent of pairs have mates with different tags; all of them are improper pairs, which are dropped by default. If they are kept, each mate is decoded by its own tag.) For Biscuit, bwameth and gem3 the call is read from the base itself; for Bismark it is read from the `XM` string, which Bismark writes on the `C` of the CpG for top-strand alignments and on the `G` for bottom-strand ones. If a Bismark-style BAM has no `XG` tag, the strand is inferred from the bases the calls sit on.
 
-Extraction has been checked against real Bismark and bwa-meth output for the same reads, which must — and do — give identical matrices. Biscuit shares bwa-meth's `YD` convention. The gem3 `XB` path follows its documented meaning but has not been checked against real gem3 output.
+Extraction has been checked against real Bismark and bwa-meth output for the same reads, which must — and do — give identical matrices, with and without `--mask-3prime`. Biscuit shares bwa-meth's `YD` convention. The gem3 `XB` path follows the meaning given in gem3's source code but has not been checked against real gem3 output.
 
-**Directional libraries and the strand-tag check.** For Biscuit, bwameth and gem3, bam2tensor decodes each read on the strength of the aligner's strand tag. bwa-meth assumes a directional library (read 1 from the original top or bottom strand, as in standard WGBS and EM-seq preps). If a non-directional library (PBAT and some single-cell protocols, where read 1 may come from a complementary strand) is aligned with bwa-meth, most of the complementary-strand pairs receive a `YD` tag that contradicts their bases, and their CpGs are then called methylated regardless of their true state.
+**Directional libraries and the strand-tag check.** For Biscuit, bwameth and gem3, bam2tensor decodes each read on the strength of the aligner's strand tag. bwa-meth assumes a directional library (read 1 from the original top or bottom strand, as in standard WGBS and EM-seq preps). If a non-directional library (PBAT and some single-cell protocols, where read 1 may come from a complementary strand) is aligned with bwa-meth, most of the complementary-strand pairs receive a `YD` tag that contradicts their bases. Such a read is decoded on the base its strand never converts, which always reads as methylated. Where the CpG is in fact unmethylated, the conversion shows on the CpG's other base, the read fails the intact-CpG rule, and the call is stored as `-1`. So no unmethylated call survives from a mis-tagged read, and methylation is overstated.
 
-bam2tensor checks for this. A read reports on one strand, so only one base of each CpG can show a conversion; the other base (the `G` for a top-strand read, the `C` for a bottom-strand read) never does. bam2tensor looks at that other base wherever a read covers it, and counts the CpGs where it shows the *other* strand's conversion product. In correctly tagged data that happens only through sequencing errors and SNPs. If more than 2% of at least 1,000 checked CpGs contradict their read's tag, the BAM's report carries a warning:
+bam2tensor checks for this. A read reports on one strand, so only one base of each CpG can show a conversion; the other base (the `G` for a top-strand read, the `C` for a bottom-strand read) never does. bam2tensor looks at that other base wherever a read covers it with sufficient base quality, and counts the CpGs where it shows the *other* strand's conversion product. In correctly tagged data that happens only through sequencing errors and SNPs (0.7% of CpGs in a real human EM-seq sample). If more than 2% of at least 1,000 checked CpGs contradict their read's tag, the BAM's report carries a warning:
 
 ```
   WARNING: 245 of 1,542 CpGs (15.9%) in sample.bam show a conversion on the
@@ -749,13 +845,20 @@ extract_methylation_data_from_bam(
     em_overconversion_min_cpgs: int = 3,               # Min CpGs before applying the above filter
     threads: int = 1,                                  # Worker processes for per-chromosome extraction
     verbose: bool = False,                             # Enable verbose output
-    debug: bool = False                                # Enable debug output
+    debug: bool = False,                               # Enable debug output
+    min_base_quality: int = 20,                        # Minimum base quality of a call (0 = off)
+    mask_3prime: int = 0,                              # Bases to mask at each fragment's 3' end
+    keep_improper_pairs: bool = False,                 # Keep reads not in a proper pair
+    allow_length_mismatch: bool = False                # Skip the chromosome-length check
 ) -> ExtractionResult
 ```
 
-**Returns:** An `ExtractionResult` named tuple with two fields:
+**Returns:** An `ExtractionResult` named tuple with three fields:
 - `matrix`: A SciPy COO sparse matrix with shape (n_fragments, n_cpg_sites) and `int64` values
 - `tlen`: A 1-D numpy `int32` array of shape (n_fragments,) containing the length of each fragment (absolute BAM TLEN; 0 if unknown)
+- `stats`: A dict of counts of what was decoded and discarded (the `extraction_stats` of [Embedded Metadata](#embedded-metadata)). New in v3.0: code that unpacked the result as `matrix, tlen = ...` must be updated.
+
+**Raises:** `ValueError` if the BAM shares no chromosome name with the embedding, or gives a shared chromosome a different length (unless `allow_length_mismatch=True`).
 
 **Using `threads > 1` from your own script:** worker processes are started with the `spawn` method, which re-imports your script in each worker. Call the function from under `if __name__ == "__main__":` (standard `multiprocessing` practice); otherwise the workers cannot start.
 

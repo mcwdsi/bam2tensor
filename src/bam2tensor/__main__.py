@@ -178,14 +178,34 @@ def validate_input_output(
 
     Raises:
         ValueError: If any input BAM file is not readable, if the
-            directory an output will be written to is not writable, or if
+            directory an output will be written to is not writable, if
             ``overwrite`` is set and an existing output file is not
-            writable.
+            writable, or if two input BAMs would be written to the same
+            output file.
 
     Note:
         Output files are named by replacing the .bam extension with
         .methylation.npz (e.g., sample.bam -> sample.methylation.npz).
+        With ``output_dir``, only the BAM's file name is kept, so two BAMs
+        of the same name in different directories would share one output:
+        the second would be skipped as "already exists", or would replace
+        the first under ``--overwrite``. That is refused up front.
     """
+
+    # Two inputs, one output: refuse rather than silently lose a sample.
+    inputs_by_output: dict[str, list[str]] = {}
+    for bam_file in bams_to_process:
+        output_file = os.path.abspath(get_output_path(bam_file, output_dir))
+        inputs_by_output.setdefault(output_file, []).append(bam_file)
+    for output_file, inputs in inputs_by_output.items():
+        if len(inputs) > 1:
+            raise ValueError(
+                f"{len(inputs)} input BAMs would be written to the same output "
+                f"file {output_file}: {', '.join(sorted(inputs))}. Rename the "
+                "BAMs, process the directories separately with different "
+                "--output-dir values, or omit --output-dir to write each "
+                "output next to its BAM."
+            )
 
     for bam_file in bams_to_process:
         if not os.access(bam_file, os.R_OK):
@@ -270,9 +290,47 @@ def write_output(
 )
 @click.option(
     "--quality-limit",
-    help="Quality filter for aligned reads (default = 20)",
+    help="Minimum mapping quality (MAPQ) of a read (default = 20).",
     default=20,
     type=int,
+)
+@click.option(
+    "--min-base-quality",
+    help=(
+        "Minimum Phred quality of the base that carries a CpG call "
+        "(default = 20). Calls on lower-quality bases are stored as -1 (no "
+        "usable call). Use 0 to turn the filter off."
+    ),
+    default=20,
+    type=click.IntRange(min=0),
+)
+@click.option(
+    "--mask-3prime",
+    help=(
+        "Store -1 (no usable call) for CpGs within this many bases of the 3' "
+        "end of each fragment's original strand, where end repair fills in "
+        "unmethylated cytosines before conversion (default = 0, off). Leave "
+        "off if the reads were already trimmed for this before alignment."
+    ),
+    default=0,
+    type=click.IntRange(min=0),
+)
+@click.option(
+    "--keep-improper-pairs",
+    help=(
+        "Keep paired reads that the aligner did not flag as a proper pair. "
+        "By default they are dropped."
+    ),
+    is_flag=True,
+)
+@click.option(
+    "--allow-length-mismatch",
+    help=(
+        "Do not require chromosome lengths in the BAM header to match the "
+        "reference FASTA. Only for a reference that is a deliberately "
+        "truncated copy of the one the BAM was aligned to."
+    ),
+    is_flag=True,
 )
 @click.option(
     "--filter-non-converted",
@@ -297,17 +355,18 @@ def write_output(
 @click.option(
     "--filter-em-overconversion",
     help=(
-        "Drop EM-seq fragments whose covered CpGs are all called unmethylated "
-        "and cover at least --em-overconversion-min-cpgs sites (heuristic "
-        "for the fragment-level over-conversion artifact described in "
-        "Loyfer et al. bioRxiv 2026.03.24.713040). Default: off."
+        "Drop EM-seq fragments whose CpG calls are all unmethylated and "
+        "number at least --em-overconversion-min-cpgs (heuristic for the "
+        "fragment-level over-conversion artifact described in Loyfer et al. "
+        "bioRxiv 2026.03.24.713040). CpGs without a usable call are left "
+        "out of the decision. Default: off."
     ),
     is_flag=True,
 )
 @click.option(
     "--em-overconversion-min-cpgs",
     help=(
-        "Minimum covered CpG count required before the EM over-conversion "
+        "Minimum number of CpG calls required before the EM over-conversion "
         "filter will drop a fragment (default = 3)."
     ),
     default=3,
@@ -359,6 +418,10 @@ def main(
     expected_chromosomes: str | None,
     reference_fasta: str | None,
     quality_limit: int,
+    min_base_quality: int,
+    mask_3prime: int,
+    keep_improper_pairs: bool,
+    allow_length_mismatch: bool,
     filter_non_converted: bool,
     non_converted_threshold: int,
     filter_em_overconversion: bool,
@@ -381,7 +444,8 @@ def main(
     The workflow is:
         1. Load or generate a CpG site index for the reference genome
         2. Find all BAM files to process (single file or directory)
-        3. Validate input/output permissions
+        3. Validate input/output permissions, and that no two BAMs would
+           be written to the same output file
         4. For each BAM file:
            a. Extract methylation states from aligned reads
            b. Build a sparse matrix (rows=fragments, columns=CpG sites)
@@ -401,16 +465,24 @@ def main(
             ``--download-reference`` is used.
         quality_limit: Minimum mapping quality (MAPQ) threshold. Reads below
             this quality are excluded.
+        min_base_quality: Minimum Phred quality of the base carrying a CpG
+            call; calls on lower-quality bases are stored as ``-1``.
+        mask_3prime: Number of bases at the 3' end of each fragment's
+            original strand in which calls are stored as ``-1``.
+        keep_improper_pairs: If True, keep paired reads not flagged as a
+            proper pair.
+        allow_length_mismatch: If True, do not require chromosome lengths
+            in the BAM header to match the reference FASTA.
         filter_non_converted: If True, drop fragments in which a read
             has at least ``non_converted_threshold`` retained non-CpG
             cytosines — indicating incomplete bisulfite/EM-seq conversion.
         non_converted_threshold: Threshold used by the non-converted
             read filter.
-        filter_em_overconversion: If True, drop fragments whose covered
-            CpGs are all called unmethylated and cover at least
-            ``em_overconversion_min_cpgs`` sites — heuristic for EM-seq
+        filter_em_overconversion: If True, drop fragments whose CpG
+            calls are all unmethylated and number at least
+            ``em_overconversion_min_cpgs`` — heuristic for EM-seq
             fragment-level over-conversion (Loyfer et al. 2026).
-        em_overconversion_min_cpgs: Minimum covered CpG count required
+        em_overconversion_min_cpgs: Minimum number of CpG calls required
             before the over-conversion filter will drop a fragment.
         threads: Number of worker processes for per-chromosome
             extraction. Default 1.
@@ -432,17 +504,20 @@ def main(
             is missing when not using ``--download-reference``.
         ClickException: If the CpG site index cannot be built for the
             requested configuration (for example, an expected chromosome
-            is absent from the reference FASTA, or the cache on disk was
-            built for a different chromosome list).
+            is absent from the reference FASTA or listed twice, or the
+            cache on disk was built for a different chromosome list), or
+            if the inputs and outputs fail validation (an unreadable BAM,
+            an unwritable output location, or two BAMs that would be
+            written to the same output file).
 
     Note:
         This function is decorated with Click options and is typically
         invoked via the command line rather than called directly.
 
         A BAM that cannot be processed (missing index, chromosome names
-        that do not match the reference, unreadable file) is reported and
-        skipped so the remaining BAMs still run. If any BAM failed, the
-        process exits with status 1 after printing the summary.
+        or lengths that do not match the reference, unreadable file) is
+        reported and skipped so the remaining BAMs still run. If any BAM
+        failed, the process exits with status 1 after printing the summary.
     """
     # Handle --list-genomes: print available genomes and exit
     if list_genomes:
@@ -505,6 +580,16 @@ def main(
     print(f"  Reference:     {reference_fasta}")
     print(f"  Chromosomes:   {chrom_display}")
     print(f"  Quality limit: MAPQ >= {quality_limit}")
+    print(
+        "  Base quality:  "
+        + (f">= {min_base_quality}" if min_base_quality else "not filtered")
+    )
+    print(
+        "  Read pairs:    "
+        + ("improper pairs kept" if keep_improper_pairs else "proper pairs only")
+    )
+    if mask_3prime:
+        print(f"  3' end mask:   {mask_3prime} bp")
     if threads > 1:
         print(f"  Threads:       {threads} worker process(es)")
     if filter_non_converted:
@@ -554,11 +639,15 @@ def main(
     for idx, bam_file in enumerate(bams_to_process, 1):
         print(f"  {idx}. {bam_file}")
 
-    validate_input_output(
-        bams_to_process=bams_to_process,
-        overwrite=overwrite,
-        output_dir=output_dir,
-    )
+    try:
+        validate_input_output(
+            bams_to_process=bams_to_process,
+            overwrite=overwrite,
+            output_dir=output_dir,
+        )
+    except ValueError as e:
+        # Report the problem itself, not a traceback.
+        raise click.ClickException(str(e)) from e
 
     # ── Process each BAM ────────────────────────────────────────────────
     errors_list: list[Exception] = []
@@ -601,6 +690,10 @@ def main(
                     threads=threads,
                     verbose=verbose,
                     debug=debug,
+                    min_base_quality=min_base_quality,
+                    mask_3prime=mask_3prime,
+                    keep_improper_pairs=keep_improper_pairs,
+                    allow_length_mismatch=allow_length_mismatch,
                 )
         except (OSError, ValueError) as e:
             # Problems with this particular BAM (missing index, chromosome
@@ -621,6 +714,27 @@ def main(
             f"  Result:        {n_fragments:,} fragments x {n_cpgs:,} CpG sites"
             f" ({n_data:,} data points)"
         )
+        stats = extraction_result.stats
+        if stats["fragments_from_two_mates"]:
+            print(
+                f"  Mates merged:  {stats['fragments_from_two_mates']:,} "
+                "fragment(s) combine the calls of two mates"
+            )
+        n_observed = stats["cpg_observations"]
+        if n_observed:
+            print(
+                f"  No call (-1):  {stats['cpg_not_intact'] / n_observed:.2%} of "
+                f"CpG observations not intact in the read, "
+                f"{stats['cpg_low_base_quality'] / n_observed:.2%} low base "
+                "quality"
+            )
+        if stats["cpg_masked_3prime"]:
+            print(f"  3' end mask:   {stats['cpg_masked_3prime']:,} call(s) discarded")
+        if stats["reads_dropped_improper_pair"]:
+            print(
+                f"  Dropped:       {stats['reads_dropped_improper_pair']:,} "
+                "read(s) not in a proper pair"
+            )
 
         # Save
         write_output(
@@ -634,7 +748,13 @@ def main(
                 "expected_chromosomes": chrom_list,
                 "total_cpg_sites": genome_methylation_embedding.total_cpg_sites,
                 "cpg_index_crc32": cpg_crc32,
+                "input_bam": bam_basename,
+                "aligner": aligner,
                 "filters": {
+                    "min_mapping_quality": quality_limit,
+                    "min_base_quality": min_base_quality,
+                    "mask_3prime": mask_3prime,
+                    "keep_improper_pairs": keep_improper_pairs,
                     "non_converted_reads": {
                         "enabled": filter_non_converted,
                         "threshold": non_converted_threshold,
@@ -644,6 +764,7 @@ def main(
                         "min_cpgs": em_overconversion_min_cpgs,
                     },
                 },
+                "extraction_stats": extraction_result.stats,
             },
         )
         print(f"  Output:        {output_file}")
