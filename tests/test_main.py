@@ -121,6 +121,7 @@ def test_main(runner: CliRunner, tmp_path) -> None:
             "--overwrite",
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -149,6 +150,7 @@ def test_main_output_defaults_to_input_directory(runner: CliRunner, tmp_path) ->
             str(tmp_path / "sample.bam"),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -176,6 +178,7 @@ def test_main_skip_existing(runner: CliRunner, tmp_path) -> None:
             str(tmp_path / "test.bam"),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -201,6 +204,7 @@ def test_main_missing_bam_index(runner: CliRunner, tmp_path) -> None:
             str(tmp_path / "no_index.bam"),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -262,6 +266,7 @@ def test_main_with_output_dir(runner: CliRunner, tmp_path) -> None:
             str(tmp_path / "test.bam"),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -291,6 +296,7 @@ def test_main_output_dir_created(runner: CliRunner, tmp_path) -> None:
             str(tmp_path / "test.bam"),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -356,6 +362,7 @@ def test_main_missing_genome_name(runner: CliRunner) -> None:
             TEST_BAM,
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
         ],
     )
 
@@ -372,6 +379,7 @@ def test_main_default_expected_chromosomes(runner: CliRunner, tmp_path) -> None:
             TEST_BAM,
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test_default_chroms",
             "--skip-cache",
@@ -404,6 +412,7 @@ def test_main_few_chromosomes_display(runner: CliRunner, tmp_path) -> None:
             TEST_BAM,
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test_few_chroms",
             "--expected-chromosomes",
@@ -437,6 +446,7 @@ def test_main_download_reference(runner: CliRunner, tmp_path) -> None:
                 TEST_BAM,
                 "--download-reference",
                 "hg38",
+                "--allow-length-mismatch",
                 "--expected-chromosomes",
                 "chr1",
                 "--skip-cache",
@@ -466,6 +476,7 @@ def test_main_download_reference_with_genome_name(runner: CliRunner, tmp_path) -
                 TEST_BAM,
                 "--download-reference",
                 "hg38",
+                "--allow-length-mismatch",
                 "--genome-name",
                 "custom_name",
                 "--expected-chromosomes",
@@ -491,6 +502,7 @@ def test_main_verbose_flag(runner: CliRunner, tmp_path) -> None:
             "--overwrite",
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -537,6 +549,7 @@ def test_main_writes_tlen(runner: CliRunner, tmp_path) -> None:
             str(tmp_path / "test.bam"),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -629,7 +642,9 @@ def _small_result():
         (np.array([1, 0, -1]), (np.array([0, 0, 1]), np.array([0, 2, 1]))),
         shape=(2, 5),
     )
-    return ExtractionResult(matrix=matrix, tlen=np.array([150, 0], dtype=np.int32))
+    return ExtractionResult(
+        matrix=matrix, tlen=np.array([150, 0], dtype=np.int32), stats={}
+    )
 
 
 def test_write_output_writes_matrix_tlen_and_metadata(tmp_path) -> None:
@@ -705,6 +720,7 @@ def test_main_interrupted_save_is_redone_on_the_next_run(
         str(tmp_path / "sample.bam"),
         "--reference-fasta",
         TEST_FASTA,
+        "--allow-length-mismatch",
         "--genome-name",
         "test",
         "--expected-chromosomes",
@@ -778,6 +794,7 @@ def test_main_continues_past_failing_bams(runner: CliRunner, tmp_path) -> None:
             str(bam_dir),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -824,6 +841,7 @@ def test_main_exit_status_zero_when_all_bams_succeed(
             str(bam_dir),
             "--reference-fasta",
             TEST_FASTA,
+            "--allow-length-mismatch",
             "--genome-name",
             "test",
             "--expected-chromosomes",
@@ -853,6 +871,7 @@ def test_main_cache_built_for_other_chromosomes_is_clean_error(
         TEST_BAM,
         "--reference-fasta",
         TEST_FASTA,
+        "--allow-length-mismatch",
         "--genome-name",
         "shared_name",
         "--output-dir",
@@ -876,3 +895,182 @@ def test_main_cache_built_for_other_chromosomes_is_clean_error(
         __main__.main, common + ["--expected-chromosomes", "chr1", "--skip-cache"]
     )
     assert third.exit_code == 0, third.output
+
+
+def test_main_duplicate_expected_chromosomes_is_clean_error(
+    runner: CliRunner, tmp_path
+) -> None:
+    """A chromosome listed twice is refused with a message, not a traceback."""
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            TEST_BAM,
+            "--reference-fasta",
+            TEST_FASTA,
+            "--genome-name",
+            "duplicated",
+            "--expected-chromosomes",
+            "chr1,chr2,chr1",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "listed more than once: chr1" in result.output
+    assert "Traceback" not in result.output
+    assert not list((tmp_path / "out").glob("*.npz"))
+
+
+# ======================================================================
+# The BAM must have been aligned to the reference
+# ======================================================================
+
+
+def test_main_rejects_a_bam_aligned_to_another_reference(
+    runner: CliRunner, tmp_path
+) -> None:
+    """test.bam is aligned to hg38, whose chromosomes are not 700 kb long.
+
+    Without --allow-length-mismatch the BAM is reported as an error, nothing
+    is written, and the exit status is 1.
+    """
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            TEST_BAM,
+            "--reference-fasta",
+            TEST_FASTA,
+            "--genome-name",
+            "test",
+            "--expected-chromosomes",
+            "chr1,chr2,chr3",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "ERROR: The BAM file was not aligned to the reference FASTA" in result.output
+    assert "chr1 (248,956,422 bp in the BAM, 700,000 bp in the reference)" in (
+        result.output
+    )
+    assert "Processed:     0 BAM(s)" in result.output
+    assert not list((tmp_path / "out").glob("*.npz"))
+
+
+# ======================================================================
+# Two inputs must not share one output
+# ======================================================================
+
+
+def _same_named_bams(tmp_path) -> list[str]:
+    """Two BAMs called sample.bam in different directories."""
+    paths = []
+    for batch in ("batch1", "batch2"):
+        (tmp_path / batch).mkdir()
+        shutil.copy(TEST_BAM, tmp_path / batch / "sample.bam")
+        shutil.copy(TEST_BAM_INDEX, tmp_path / batch / "sample.bam.bai")
+        paths.append(str(tmp_path / batch / "sample.bam"))
+    return paths
+
+
+def test_validate_input_output_rejects_colliding_outputs(tmp_path) -> None:
+    """With an output directory, same-named BAMs would share an output file."""
+    bams = _same_named_bams(tmp_path)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    with pytest.raises(ValueError) as excinfo:
+        __main__.validate_input_output(
+            bams, overwrite=False, output_dir=str(output_dir)
+        )
+    message = str(excinfo.value)
+    assert "2 input BAMs would be written to the same output file" in message
+    assert str(output_dir / "sample.methylation.npz") in message
+    assert all(bam in message for bam in bams)
+
+    # --overwrite does not make it acceptable: one sample would still be lost.
+    with pytest.raises(ValueError, match="same output file"):
+        __main__.validate_input_output(bams, overwrite=True, output_dir=str(output_dir))
+
+    # Next to their BAMs the outputs are distinct.
+    __main__.validate_input_output(bams, overwrite=False)
+
+
+def test_main_refuses_colliding_outputs_before_doing_any_work(
+    runner: CliRunner, tmp_path
+) -> None:
+    """A recursive run that would lose a sample stops before extracting.
+
+    Regression: the second BAM was skipped as "output already exists" (or,
+    with --overwrite, replaced the first), and the run exited 0.
+    """
+    _same_named_bams(tmp_path)
+    output_dir = tmp_path / "out"
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            str(tmp_path),
+            "--reference-fasta",
+            TEST_FASTA,
+            "--allow-length-mismatch",
+            "--genome-name",
+            "test",
+            "--expected-chromosomes",
+            "chr1,chr2,chr3",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "2 input BAMs would be written to the same output file" in result.output
+    assert "Extracting methylation data" not in result.output
+    assert "Traceback" not in result.output
+    assert not list(output_dir.glob("*.npz"))
+
+
+def test_main_same_named_bams_without_output_dir_are_fine(
+    runner: CliRunner, tmp_path
+) -> None:
+    """Written next to their BAMs, same-named inputs do not collide."""
+    bams = _same_named_bams(tmp_path)
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            str(tmp_path),
+            "--reference-fasta",
+            TEST_FASTA,
+            "--allow-length-mismatch",
+            "--genome-name",
+            "test",
+            "--expected-chromosomes",
+            "chr1,chr2,chr3",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Processed:     2 BAM(s)" in result.output
+    for bam in bams:
+        assert os.path.exists(bam.replace(".bam", ".methylation.npz"))
+
+
+def test_main_rejects_negative_option_values(runner: CliRunner) -> None:
+    """--min-base-quality and --mask-3prime must not be negative."""
+    for option in ("--min-base-quality", "--mask-3prime"):
+        result = runner.invoke(
+            __main__.main,
+            [
+                "--input-path",
+                TEST_BAM,
+                "--reference-fasta",
+                TEST_FASTA,
+                "--genome-name",
+                "test",
+                option,
+                "-1",
+            ],
+        )
+        assert result.exit_code == 2, option
+        assert option in result.output

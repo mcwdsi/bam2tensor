@@ -19,12 +19,16 @@ TEST_EMBEDDING = embedding.GenomeMethylationEmbedding(
 def test_extract_methylation_data_from_bam() -> None:
     """Test extract_methylation_data_from_bam."""
 
+    # test.bam is aligned to hg38, not to the 700 kb stand-in reference in
+    # test_fasta.fa. This is a smoke test of the plumbing only, so the check
+    # that would (rightly) refuse the combination is switched off.
     result = functions.extract_methylation_data_from_bam(
         input_bam=TEST_BAM,
         genome_methylation_embedding=TEST_EMBEDDING,
         quality_limit=20,
         verbose=True,
         debug=False,
+        allow_length_mismatch=True,
     )
 
     assert isinstance(result, ExtractionResult)
@@ -43,6 +47,7 @@ def test_extract_methylation_data_from_bam_debug() -> None:
         quality_limit=20,
         verbose=True,
         debug=True,
+        allow_length_mismatch=True,
     )
 
     assert result.matrix.shape == (1, 37489)
@@ -165,7 +170,7 @@ def _make_bam_with_reads(tmp_path, reads, seq_len=150):
     )
 
     bam_path = tmp_path / "test.bam"
-    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": seq_len, "SN": "chr1"}]}
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 154, "SN": "chr1"}]}
     with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
         for r in reads:
             a = pysam.AlignedSegment()
@@ -356,7 +361,11 @@ def test_top_strand_fragment_is_read_at_the_c(tmp_path, flag, tag):
                 "name": "top",
                 "flag": flag,
                 "mapq": 60,
-                "seq": _read_with_bases(_CPG_C_POSITIONS, "CTCT"),
+                # C / T at the C positions; the G of every CpG reads G (it
+                # is not informative here, but shows the CpG is intact).
+                "seq": _read_with_bases(
+                    _CPG_C_POSITIONS + _CPG_G_POSITIONS, "CTCT" + "GGGG"
+                ),
                 "tags": [("MD", "150"), tag],
             },
         ],
@@ -404,14 +413,33 @@ def test_bottom_strand_fragment_is_read_at_the_g(tmp_path, flag, tag):
     assert result.matrix.data.tolist() == [1, 0, 1, 0]
 
 
-def test_strand_tag_decides_which_base_is_read(tmp_path):
+@pytest.mark.parametrize(
+    "c_bases, g_bases, as_top, as_bottom",
+    [
+        # CpG intact and unconverted on both bases: methylated either way.
+        ("CCCC", "GGGG", [1, 1, 1, 1], [1, 1, 1, 1]),
+        # T at every C: the top strand's conversion. Unmethylated for a
+        # top-strand fragment. A bottom-strand fragment cannot convert the C,
+        # so for it this molecule has no CpG here: no call.
+        ("TTTT", "GGGG", [0, 0, 0, 0], [-1, -1, -1, -1]),
+        # A at every G: the bottom strand's conversion, and the mirror image.
+        ("CCCC", "AAAA", [-1, -1, -1, -1], [0, 0, 0, 0]),
+    ],
+    ids=["unconverted", "c-to-t", "g-to-a"],
+)
+def test_strand_tag_decides_which_base_is_read(
+    tmp_path, c_bases, g_bases, as_top, as_bottom
+):
     """The same read decodes differently under the two strand tags.
 
-    With C at every C and A at every G: methylated everywhere if the fragment
-    is top strand, unmethylated everywhere if it is bottom strand.
+    The call is read from the base the tagged strand converts, and is only
+    kept if the CpG's other base still reads as the reference has it. A read
+    carrying the *other* strand's conversion (as a mis-tagged read does at
+    every unmethylated CpG) therefore yields no call, rather than a
+    methylated one.
     """
-    seq = _read_with_bases(_CPG_C_POSITIONS + _CPG_G_POSITIONS, "CCCC" + "AAAA")
-    for tag, expected in ((("YD", "f"), [1, 1, 1, 1]), (("YD", "r"), [0, 0, 0, 0])):
+    seq = _read_with_bases(_CPG_C_POSITIONS + _CPG_G_POSITIONS, c_bases + g_bases)
+    for tag, expected in ((("YD", "f"), as_top), (("YD", "r"), as_bottom)):
         directory = tmp_path / tag[1]
         directory.mkdir()
         emb, bam_path = _make_bam_with_reads(
@@ -563,12 +591,18 @@ def _make_bismark_bam(tmp_path, reads, seq_len=154):
     )
 
     bam_path = tmp_path / "bismark.bam"
-    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": seq_len, "SN": "chr1"}]}
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 154, "SN": "chr1"}]}
+    # Unless a test says otherwise, a read shows the reference bases, so
+    # every CpG it covers is intact (C followed by G).
+    reference = (
+        "N" * 9 + "CG" + "N" * 9 + "CG" + "N" * 79 + "CG" + "N" * 9 + "CG" + "N" * 40
+    )
     with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
         for r in reads:
             a = pysam.AlignedSegment()
             a.query_name = r["name"]
-            a.query_sequence = r.get("seq", "N" * seq_len)
+            start = r.get("start", 0)
+            a.query_sequence = r.get("seq", reference[start : start + seq_len])
             a.flag = r["flag"]
             a.reference_id = 0
             a.reference_start = r.get("start", 0)
@@ -1027,8 +1061,8 @@ def test_biscuit_methylated_and_unmethylated_bases(tmp_path):
     header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": len(seq), "SN": "chr1"}]}
     # Build a read with C at position 9 (methylated) and T at position 20 (unmethylated)
     read_seq = list("N" * len(seq))
-    read_seq[9] = "C"  # methylated at CpG pos 10
-    read_seq[20] = "T"  # unmethylated at CpG pos 21
+    read_seq[9:11] = "CG"  # methylated at CpG pos 10
+    read_seq[20:22] = "TG"  # unmethylated at CpG pos 21
     with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
         a = pysam.AlignedSegment()
         a.query_name = "read1"
@@ -1049,9 +1083,7 @@ def test_biscuit_methylated_and_unmethylated_bases(tmp_path):
     )
     assert result.matrix.shape[0] == 1
     assert result.matrix.nnz == 2
-    data = list(result.matrix.data)
-    assert 1 in data  # methylated
-    assert 0 in data  # unmethylated
+    assert result.matrix.data.tolist() == [1, 0]
 
 
 def test_biscuit_debug_mode_ct_bases(tmp_path):
@@ -1174,8 +1206,8 @@ def test_biscuit_ot_and_ob_share_cpg_columns(tmp_path):
     header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": len(seq), "SN": "chr1"}]}
     # OT read: C at top-strand C positions = methylated at both CpGs.
     ot_seq = list("N" * len(seq))
-    ot_seq[9] = "C"
-    ot_seq[20] = "C"
+    ot_seq[9:11] = "CG"
+    ot_seq[20:22] = "CG"
     # OB read (BAM in reference orientation): G at top-strand G positions
     # = methylated at both CpGs.
     ob_seq = list("N" * len(seq))
@@ -1367,7 +1399,7 @@ def test_tlen_with_template_length(tmp_path):
     )
 
     bam_path = tmp_path / "test.bam"
-    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": 150, "SN": "chr1"}]}
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"LN": len(seq), "SN": "chr1"}]}
     with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
         a = pysam.AlignedSegment()
         a.query_name = "read1"
@@ -1484,7 +1516,10 @@ def _make_bam_from_segments(tmp_path, build_segments, seq_len=150):
 
     bam_path = tmp_path / "segments.bam"
     header = pysam.AlignmentHeader.from_dict(
-        {"HD": {"VN": "1.0", "SO": "coordinate"}, "SQ": [{"LN": seq_len, "SN": "chr1"}]}
+        {
+            "HD": {"VN": "1.0", "SO": "coordinate"},
+            "SQ": [{"LN": len(seq), "SN": "chr1"}],
+        }
     )
     with pysam.AlignmentFile(bam_path, "wb", header=header) as out_bam:
         for segment in build_segments(header):
@@ -1550,14 +1585,25 @@ def test_unmapped_placed_mate_is_skipped(tmp_path, strand_tag):
     )
 
     for quality_limit in (0, 20):
+        # A read whose mate is unmapped is not in a proper pair, so the
+        # mapped mate is only reported when improper pairs are kept.
         result = functions.extract_methylation_data_from_bam(
             input_bam=bam_path,
             genome_methylation_embedding=emb,
             quality_limit=quality_limit,
+            keep_improper_pairs=True,
         )
         # Only the mapped mate contributes a row.
         assert result.matrix.shape[0] == 1
         assert len(result.tlen) == 1
+
+        default = functions.extract_methylation_data_from_bam(
+            input_bam=bam_path,
+            genome_methylation_embedding=emb,
+            quality_limit=quality_limit,
+        )
+        assert default.matrix.shape[0] == 0
+        assert default.stats["reads_dropped_improper_pair"] == 1
 
 
 def test_unmapped_placed_mate_is_skipped_in_parallel_path(tmp_path):
@@ -1573,6 +1619,7 @@ def test_unmapped_placed_mate_is_skipped_in_parallel_path(tmp_path):
         input_bam=bam_path,
         genome_methylation_embedding=emb,
         quality_limit=0,
+        keep_improper_pairs=True,
         threads=2,
     )
     assert result.matrix.shape[0] == 1
@@ -1610,3 +1657,98 @@ def test_detect_aligner_ignores_unmapped_reads(tmp_path):
         ],
     )
     assert detect_aligner(bam_path) == "Biscuit/bwameth (YD tag)"
+
+
+# ======================================================================
+# Reference check: chromosome lengths
+# ======================================================================
+
+
+def test_check_chromosome_lengths_accepts_matching_lengths() -> None:
+    """Equal lengths pass; names found on one side only are not compared."""
+    functions.check_chromosome_lengths(
+        bam_lengths={"chr1": 1000, "chr2": 500, "chrM": 16569},
+        reference_lengths={"chr1": 1000, "chr2": 500, "chr3": 300},
+    )
+    functions.check_chromosome_lengths(bam_lengths={}, reference_lengths={})
+
+
+def test_check_chromosome_lengths_reports_the_difference() -> None:
+    """The error names the chromosome and both lengths."""
+    with pytest.raises(ValueError) as excinfo:
+        functions.check_chromosome_lengths(
+            bam_lengths={"chr1": 249250621, "chr2": 500},
+            reference_lengths={"chr1": 248956422, "chr2": 500},
+        )
+    message = str(excinfo.value)
+    assert "not aligned to the reference FASTA" in message
+    assert (
+        "chr1 (249,250,621 bp in the BAM, 248,956,422 bp in the reference)" in message
+    )
+    assert "chr2" not in message
+    assert "--allow-length-mismatch" in message
+
+
+def test_check_chromosome_lengths_truncates_a_long_list() -> None:
+    """Many mismatches are summarised rather than listed in full."""
+    names = [f"chr{i}" for i in range(1, 11)]
+    with pytest.raises(ValueError) as excinfo:
+        functions.check_chromosome_lengths(
+            bam_lengths={name: 10 for name in names},
+            reference_lengths={name: 20 for name in names},
+        )
+    message = str(excinfo.value)
+    assert "chr3 (10 bp in the BAM, 20 bp in the reference)" in message
+    assert "chr4 (" not in message
+    assert "(10 chromosomes in total)" in message
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_bam_aligned_to_another_reference_is_rejected(tmp_path, threads) -> None:
+    """A BAM whose header gives a chromosome another length is not extracted.
+
+    Regression: any chromosome name in common was enough, so a BAM aligned
+    to one assembly was silently decoded at the CpG positions of another.
+    """
+    emb, bam_path = _make_bam_from_segments(
+        tmp_path, lambda header: [_mapped_segment(header, "read")]
+    )
+    # Same chromosome name, another assembly: 20 bp longer.
+    longer = tmp_path / "longer.fa"
+    longer.write_text(">chr1\n" + "N" * 9 + "CG" + "N" * 163 + "\n")
+    other = embedding.GenomeMethylationEmbedding(
+        "other_assembly",
+        expected_chromosomes=["chr1"],
+        fasta_source=str(longer),
+        skip_cache=True,
+    )
+
+    with pytest.raises(
+        ValueError, match="chromosome lengths differ for chr1"
+    ) as excinfo:
+        functions.extract_methylation_data_from_bam(
+            input_bam=bam_path, genome_methylation_embedding=other, threads=threads
+        )
+    assert "(154 bp in the BAM, 174 bp in the reference)" in str(excinfo.value)
+
+    # The reference it was aligned to is accepted...
+    matching = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=emb, threads=threads
+    )
+    assert matching.matrix.shape == (1, 4)
+    # ...and the check can be turned off explicitly.
+    allowed = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path,
+        genome_methylation_embedding=other,
+        threads=threads,
+        allow_length_mismatch=True,
+    )
+    assert allowed.matrix.shape == (1, 1)
+
+
+def test_bundled_bam_needs_the_length_check_turned_off() -> None:
+    """test.bam is aligned to hg38, test_fasta.fa is something else: refused."""
+    with pytest.raises(ValueError, match="chromosome lengths differ"):
+        functions.extract_methylation_data_from_bam(
+            input_bam=TEST_BAM, genome_methylation_embedding=TEST_EMBEDDING
+        )

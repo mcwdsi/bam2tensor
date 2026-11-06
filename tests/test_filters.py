@@ -93,8 +93,13 @@ def test_is_em_overconversion_read_requires_min_cpgs() -> None:
     assert is_em_overconversion_read([0, 0, 1], min_cpgs=3) is False
     # Below threshold: don't flag, even if all-zero.
     assert is_em_overconversion_read([0, 0], min_cpgs=3) is False
-    # -1 (no-data) is not "unmethylated".
+    # -1 (no usable call) is not "unmethylated": it does not count towards
+    # the minimum...
     assert is_em_overconversion_read([0, 0, -1], min_cpgs=3) is False
+    assert is_em_overconversion_read([-1, -1, -1], min_cpgs=1) is False
+    # ...nor does it shield a fragment whose calls are all unmethylated.
+    assert is_em_overconversion_read([0, 0, -1, 0], min_cpgs=3) is True
+    assert is_em_overconversion_read([0, -1, 0, 1], min_cpgs=2) is False
     assert is_em_overconversion_read([], min_cpgs=1) is False
 
 
@@ -564,6 +569,7 @@ def test_default_flags_match_pre_change_behavior() -> None:
         input_bam=TEST_BAM,
         genome_methylation_embedding=emb,
         quality_limit=20,
+        allow_length_mismatch=True,  # hg38 BAM, 700 kb stand-in reference
     )
     # These numbers are the pre-change output of tests/test.bam against
     # tests/test_fasta.fa with default settings.

@@ -16,11 +16,19 @@ was simulated, instead of against numbers copied from a previous run.
 
 Both mates of a pair are copies of the same converted molecule, so they agree
 wherever they overlap — except where a simulated sequencing error says
-otherwise. Errors are drawn independently for each mate and come in two kinds:
-a base that is neither the methylated nor the unmethylated one (the CpG reads
-as "no data"), and a miscall that flips methylated to unmethylated or back
+otherwise. Errors are drawn independently for each mate and come in three
+kinds: a base that is neither the methylated nor the unmethylated one (the CpG
+reads as "no data"), a miscall that flips methylated to unmethylated or back
 (the mate reports the wrong state, which only shows where the other mate
-covers the same CpG and disagrees).
+covers the same CpG and disagrees), and a misread of the CpG's *other* base
+(the read no longer shows a CpG there, so the call is "no data").
+
+Independently of the bases, a few percent of all bases are given a low base
+quality, and a few percent of fragments are flagged as improper pairs, so that
+the base-quality and proper-pair filters have something to act on. A read's
+``cpg_calls`` describe its bases only; ``SimulatedRead.qualities``,
+``improper`` and the fragment's ends are what the tests apply those filters
+(and the 3' end mask) from.
 
 Conventions (all coordinates 0-based unless stated otherwise):
 
@@ -62,10 +70,21 @@ _P_SNV_AT_CPG = 0.03
 _P_MISCALL_AT_CPG = 0.03
 # Chance that the *other* base of a CpG — the one this strand never converts —
 # is misread as the other strand's conversion product (G read as A on the top
-# strand, C read as T on the bottom strand). It does not affect any call; it
-# gives correctly tagged reads the small rate of "contradictions" that real
-# sequencing errors and SNPs produce, for the strand-tag check to tolerate.
+# strand, C read as T on the bottom strand). The read then shows no CpG there,
+# so the call is "no data"; it also gives correctly tagged reads the small
+# rate of "contradictions" that real sequencing errors and SNPs produce, for
+# the strand-tag check to tolerate.
 _P_ERROR_AT_PARTNER_BASE = 0.005
+# Chance that any one base of a read has a low base quality, or a middling
+# one, rather than HIGH_BASE_QUALITY; and chance that a fragment is flagged as
+# an improper pair. All are drawn from a second random stream, so they leave
+# the bases of the simulated reads untouched.
+_P_LOW_BASE_QUALITY = 0.03
+_P_MEDIUM_BASE_QUALITY = 0.03
+_P_IMPROPER_PAIR = 0.05
+LOW_BASE_QUALITY = 10  # below the extractor's default limit of 20
+MEDIUM_BASE_QUALITY = 25  # above it, below a stricter limit of 30
+HIGH_BASE_QUALITY = 40
 
 # A fragment is only simulated as non-converted if every one of its reads
 # would then retain at least this many non-CpG cytosines. That keeps each
@@ -98,13 +117,19 @@ class SimulatedRead:
             fragment. ``position`` is the 1-based position of the CpG's ``C``
             either way; ``state`` is what the read shows: ``1`` (methylated),
             ``0`` (unmethylated) or ``-1`` (a sequencing error left a base
-            that is neither).
+            that is neither, or changed the CpG's other base so that the
+            read shows no CpG). Base quality is not taken into account.
         retained_non_cpg: Number of unconverted non-CpG cytosines in the read
             (guanines, for the bottom strand). ``0`` unless ``non_converted``.
         mistagged: True if the read was written with the wrong strand tag
             (see ``mistagged_fraction``). Such a read is decoded on the wrong
             base, so ``cpg_calls`` does not describe the extractor's output
             for it.
+        qualities: Phred base quality of every base of ``sequence``.
+        improper: True if the pair is not flagged as a proper pair (BAM flag
+            0x2 unset on both mates).
+        fragment_start: 0-based start of the fragment the read comes from.
+        fragment_end: 0-based end (exclusive) of that fragment.
     """
 
     name: str
@@ -121,6 +146,10 @@ class SimulatedRead:
     cpg_calls: list[tuple[int, int]]
     retained_non_cpg: int
     mistagged: bool = False
+    qualities: tuple[int, ...] = ()
+    improper: bool = False
+    fragment_start: int = 0
+    fragment_end: int = 0
 
 
 @dataclass
@@ -140,6 +169,16 @@ class SimulatedDataset:
     chromosomes: list[str]
     reads: list[SimulatedRead]
     paired: bool = True
+
+
+def _draw_base_quality(rng: random.Random) -> int:
+    """Draw one base quality: mostly high, occasionally middling or low."""
+    draw = rng.random()
+    if draw < _P_LOW_BASE_QUALITY:
+        return LOW_BASE_QUALITY
+    if draw < _P_LOW_BASE_QUALITY + _P_MEDIUM_BASE_QUALITY:
+        return MEDIUM_BASE_QUALITY
+    return HIGH_BASE_QUALITY
 
 
 def _cpg_positions(reference: str) -> list[int]:
@@ -282,6 +321,9 @@ def simulate_bam(
         if record.id in chromosomes
     }
     rng = random.Random(seed)
+    # Base qualities and pair flags come from their own stream: see
+    # _P_LOW_BASE_QUALITY.
+    extra_rng = random.Random(f"{seed}-qualities-and-flags")
     header = pysam.AlignmentHeader.from_dict(
         {
             "HD": {"VN": "1.6", "SO": "coordinate"},
@@ -315,6 +357,7 @@ def simulate_bam(
             mistagged = mistagged_fraction > 0 and rng.random() < mistagged_fraction
             non_converted = rng.random() < _P_NON_CONVERTED_FRAGMENT
             fully_unmethylated = rng.random() < _P_FULLY_UNMETHYLATED_FRAGMENT
+            improper = paired and extra_rng.random() < _P_IMPROPER_PAIR
 
             # Methylation state of every CpG touching the fragment, keyed by
             # the position of its C. (Start one base early: a bottom-strand
@@ -391,12 +434,14 @@ def simulate_bam(
                     cpg_calls.append((cpg + 1, state))
 
                     # Occasionally misread the CpG's other base (see
-                    # _P_ERROR_AT_PARTNER_BASE), where the read covers it.
+                    # _P_ERROR_AT_PARTNER_BASE), where the read covers it. The
+                    # read then shows no CpG here, whatever the call was.
                     partner = cpg if bottom_strand else cpg + 1
                     if start <= partner < end and (
                         rng.random() < _P_ERROR_AT_PARTNER_BASE
                     ):
                         bases[partner - start] = "T" if bottom_strand else "A"
+                        cpg_calls[-1] = (cpg + 1, -1)
 
                 read = SimulatedRead(
                     name=f"{chrom}_fragment{fragment_index:04d}",
@@ -419,6 +464,12 @@ def simulate_bam(
                     cpg_calls=cpg_calls,
                     retained_non_cpg=retained_non_cpg,
                     mistagged=mistagged,
+                    qualities=tuple(
+                        _draw_base_quality(extra_rng) for _ in range(READ_LENGTH)
+                    ),
+                    improper=improper,
+                    fragment_start=fragment_start,
+                    fragment_end=fragment_end,
                 )
                 mate_start = mate_starts[1 - mate_index]
                 records.append(((chrom_index, start), read, mate_start))
@@ -432,11 +483,13 @@ def simulate_bam(
             segment = pysam.AlignedSegment(header)
             segment.query_name = read.name
             segment.query_sequence = read.sequence
-            segment.query_qualities = pysam.qualitystring_to_array("I" * READ_LENGTH)
+            segment.query_qualities = pysam.qualitystring_to_array(
+                "".join(chr(quality + 33) for quality in read.qualities)
+            )
             if paired:
                 segment.flag = (
                     0x1  # paired
-                    | 0x2  # proper pair
+                    | (0 if read.improper else 0x2)  # proper pair
                     | (0x10 if read.is_reverse else 0x20)  # self / mate reverse
                     | (0x40 if read.is_read1 else 0x80)
                     | (0x400 if read.duplicate else 0)

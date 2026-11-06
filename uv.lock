@@ -127,7 +127,7 @@ wheels = [
 
 [[package]]
 name = "bam2tensor"
-version = "2.8"
+version = "3.0"
 source = { editable = "." }
 dependencies = [
     { name = "biopython" },
@@ -173,7 +173,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0.1" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "pysam", specifier = ">=0.22.0" },
-    { name = "scipy", specifier = ">=1.11.4" },
+    { name = "scipy", specifier = ">=1.15.0" },
     { name = "tqdm", specifier = ">=4.66.1" },
 ]
 

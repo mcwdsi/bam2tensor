@@ -1,6 +1,6 @@
 [project]
 name = "bam2tensor"
-version = "2.8"
+version = "3.0"
 description = "Convert bisulfite-seq and EM-seq BAM files to sparse tensor representations of DNA methylation"
 authors = [{ name = "Nick Semenkovich", email = "semenko@alum.mit.edu" }]
 license = "MIT"
@@ -24,7 +24,7 @@ classifiers = [
 dependencies = [
     "click>=8.0.1",
     "numpy>=1.26.0",
-    "scipy>=1.11.4",
+    "scipy>=1.15.0",
     "tqdm>=4.66.1",
     "biopython>=1.81",
     "pysam>=0.22.0",

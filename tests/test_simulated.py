@@ -8,7 +8,8 @@ over three chromosomes and both strands.
 
 The expected output is built by ``_expected`` below, which states the
 extractor's contract in a few lines: one row per fragment, the calls of its
-mates merged, in the order fragments first appear.
+mates merged, in the order fragments first appear; a call kept only on a base
+of sufficient quality, outside the masked 3' end of the fragment.
 """
 
 import bisect
@@ -80,9 +81,53 @@ def bismark_dataset(tmp_path_factory) -> SimulatedDataset:
 # ---------------------------------------------------------------------------
 
 
-def _passes_read_filters(read: SimulatedRead, quality_limit: int) -> bool:
-    """Whether a read survives the MAPQ and duplicate filters."""
-    return read.mapq >= quality_limit and not read.duplicate
+def _passes_read_filters(
+    read: SimulatedRead, quality_limit: int, keep_improper_pairs: bool = False
+) -> bool:
+    """Whether a read survives the MAPQ, duplicate and proper-pair filters."""
+    return (
+        read.mapq >= quality_limit
+        and not read.duplicate
+        and (keep_improper_pairs or not read.improper)
+    )
+
+
+def _read_calls(
+    read: SimulatedRead,
+    paired: bool = True,
+    min_base_quality: int = 20,
+    mask_3prime: int = 0,
+) -> list[tuple[int, int]]:
+    """What the extractor should record for each CpG of one read.
+
+    ``read.cpg_calls`` says what the bases show. A call is then discarded
+    (-1) if the base carrying it is below ``min_base_quality``, or if that
+    base lies within ``mask_3prime`` bases of the 3' end of the strand the
+    fragment derives from: the fragment's right-hand end for the top strand,
+    its left-hand end for the bottom strand. A single-end read only knows
+    its own ends, so those stand in for the fragment's.
+    """
+    informative_offset = 1 if read.bottom_strand else 0
+    if paired:
+        fragment_start, fragment_end = read.fragment_start, read.fragment_end
+    else:
+        fragment_start, fragment_end = read.start, read.start + len(read.sequence)
+
+    calls = []
+    for position, state in read.cpg_calls:
+        # 0-based reference position of the base carrying the call.
+        informative = position - 1 + informative_offset
+        if read.bottom_strand:
+            distance_from_3prime_end = informative - fragment_start
+        else:
+            distance_from_3prime_end = fragment_end - 1 - informative
+        if (
+            read.qualities[informative - read.start] < min_base_quality
+            or distance_from_3prime_end < mask_3prime
+        ):
+            state = -1
+        calls.append((position, state))
+    return calls
 
 
 def _merge_call(seen, state):
@@ -105,6 +150,9 @@ def _expected_fragments(
     quality_limit: int = 20,
     non_converted_threshold=None,
     em_overconversion_min_cpgs=None,
+    min_base_quality: int = 20,
+    mask_3prime: int = 0,
+    keep_improper_pairs: bool = False,
 ):
     """Fragments the extractor should report on one chromosome, in row order.
 
@@ -113,13 +161,17 @@ def _expected_fragments(
     A fragment is opened by the first of its reads (in BAM order) that passes
     the read filters and covers a CpG, and collects the calls of both mates.
     It is dropped if either mate fails the non-converted filter, or if its
-    merged calls trip the EM over-conversion filter.
+    merged calls trip the EM over-conversion filter: at least the minimum
+    number of calls, every one of them unmethylated (CpGs without a call do
+    not count either way).
     """
     calls: dict[str, dict[int, int]] = {}
     lengths: dict[str, int] = {}
     non_converted: set[str] = set()
     for read in dataset.reads:
-        if read.chrom != chrom or not _passes_read_filters(read, quality_limit):
+        if read.chrom != chrom or not _passes_read_filters(
+            read, quality_limit, keep_improper_pairs
+        ):
             continue
         if (
             non_converted_threshold is not None
@@ -131,7 +183,9 @@ def _expected_fragments(
             continue
         fragment = calls.setdefault(read.name, {})
         lengths.setdefault(read.name, abs(read.tlen))
-        for position, state in read.cpg_calls:
+        for position, state in _read_calls(
+            read, dataset.paired, min_base_quality, mask_3prime
+        ):
             column = emb.genomic_position_to_embedding(chrom, position)
             fragment[column] = _merge_call(fragment.get(column), state)
 
@@ -142,8 +196,8 @@ def _expected_fragments(
         states = list(fragment.values())
         if (
             em_overconversion_min_cpgs is not None
-            and len(states) >= em_overconversion_min_cpgs
-            and all(state == 0 for state in states)
+            and states.count(0) >= em_overconversion_min_cpgs
+            and 1 not in states
         ):
             continue
         fragments.append((name, dict(sorted(fragment.items())), lengths[name]))
@@ -753,18 +807,14 @@ def test_cli_output_matches_truth(
 
 @pytest.mark.parametrize("threads", [1, 2])
 def test_reordered_expected_chromosomes_match_truth(biscuit_dataset, threads) -> None:
-    """Columns follow expected_chromosomes even when it differs from FASTA order.
-
-    Rows follow the order chromosomes are stored in the embedding (FASTA
-    order), columns the requested chromosome order; the two are independent.
-    """
+    """Rows and columns follow expected_chromosomes, not the order in the FASTA."""
     reordered = embedding.GenomeMethylationEmbedding(
         "simulated_reordered",
         expected_chromosomes=["chr3", "chr1", "chr2"],
         fasta_source=TEST_FASTA,
         skip_cache=True,
     )
-    assert list(reordered.cpg_sites_dict) == CHROMOSOMES  # FASTA order
+    assert list(reordered.cpg_sites_dict) == ["chr3", "chr1", "chr2"]
     assert reordered.chromosome_offsets["chr3"] == 0
 
     result = functions.extract_methylation_data_from_bam(
@@ -774,9 +824,10 @@ def test_reordered_expected_chromosomes_match_truth(biscuit_dataset, threads) ->
     )
     _assert_matches_truth(result, _expected(biscuit_dataset, reordered), reordered)
 
-    # chr1 reads come first (row order) yet sit after all chr3 columns.
+    # chr3 comes first in both directions: the first row is a chr3 fragment,
+    # and its CpGs are among the first columns.
     first_row_columns = result.matrix.col[result.matrix.row == 0]
-    assert first_row_columns.min() >= len(reordered.cpg_sites_dict["chr3"])
+    assert first_row_columns.max() < len(reordered.cpg_sites_dict["chr3"])
 
 
 @pytest.mark.parametrize("threads", [1, 2])
@@ -1023,6 +1074,7 @@ def _expected_strand_check(dataset: SimulatedDataset, emb) -> tuple[int, int]:
     For every read the extractor decodes, and every CpG whose C and G the
     read both covers, look at the base the read's *tag* says is never
     converted: the G if tagged top strand, the C if tagged bottom strand.
+    A base below the minimum base quality is not evidence either way.
     """
     contradictions = checked = 0
     for read in dataset.reads:
@@ -1035,6 +1087,8 @@ def _expected_strand_check(dataset: SimulatedDataset, emb) -> tuple[int, int]:
         last = bisect.bisect_right(sites, end - 1)
         for position in sites[first:last]:  # 1-based position of the CpG's C
             partner = position - 1 if tagged_bottom else position
+            if read.qualities[partner - read.start] < 20:
+                continue
             checked += 1
             base = read.sequence[partner - read.start]
             contradictions += base == ("T" if tagged_bottom else "A")
@@ -1086,6 +1140,9 @@ def test_mistagged_reads_trigger_the_strand_warning(
     This is what bwa-meth does to most complementary-strand pairs of a
     non-directional library: the bases are fine, the tag is wrong, and the
     extractor — trusting the tag — reads the wrong base of every CpG.
+
+    Only the strand warning fires: the reads do match the reference, so the
+    reference check stays quiet.
     """
     assert any(read.mistagged for read in mistagged_dataset.reads)
     assert not all(read.mistagged for read in mistagged_dataset.reads)
@@ -1114,8 +1171,10 @@ def test_mistagged_reads_are_decoded_as_methylated(
 ) -> None:
     """Why the warning matters: wrong tags inflate methylation.
 
-    A mis-tagged read is decoded on the base its strand never converts, so
-    every CpG in it reads as methylated.
+    A mis-tagged read is decoded on the base its strand never converts, which
+    always reads as methylated. Where the CpG is in fact unmethylated, the
+    CpG's other base shows the conversion and the call is discarded, so only
+    methylated calls survive from such a read.
     """
 
     def methylated_fraction(dataset):
@@ -1168,3 +1227,318 @@ def test_cli_reports_the_strand_warning(mistagged_dataset, tmp_path) -> None:
     assert "strand tag" in result.output
     assert "Processed:     1 BAM(s)" in result.output
     assert (tmp_path / "out" / "simulated.biscuit.methylation.npz").exists()
+
+
+# ---------------------------------------------------------------------------
+# Base quality, proper pairs and the 3' end mask
+# ---------------------------------------------------------------------------
+
+
+def test_simulated_dataset_exercises_the_call_filters(
+    biscuit_dataset, sim_embedding
+) -> None:
+    """Guard the fixture: the filters below have something to act on."""
+    reads = [read for read in biscuit_dataset.reads if read.mapq >= 20]
+    assert sum(read.improper for read in reads) >= 20
+    assert not all(read.improper for read in reads)
+
+    low_quality_calls = masked_calls = intact_calls = 0
+    for read in reads:
+        plain = dict(read.cpg_calls)
+        filtered = dict(_read_calls(read))
+        masked = dict(_read_calls(read, mask_3prime=10))
+        for position, state in plain.items():
+            if state == -1:
+                continue
+            intact_calls += 1
+            low_quality_calls += filtered[position] == -1
+            masked_calls += masked[position] == -1 and filtered[position] != -1
+    assert low_quality_calls >= 20
+    assert masked_calls >= 20
+    assert intact_calls > 10 * (low_quality_calls + masked_calls)
+
+
+OPTION_CASES = [
+    pytest.param(dict(min_base_quality=0), id="no-base-quality-filter"),
+    pytest.param(dict(min_base_quality=30), id="base-quality-30"),
+    pytest.param(dict(keep_improper_pairs=True), id="improper-pairs-kept"),
+    pytest.param(dict(mask_3prime=5), id="mask-5"),
+    pytest.param(dict(mask_3prime=25), id="mask-25"),
+    pytest.param(
+        dict(min_base_quality=0, keep_improper_pairs=True, mask_3prime=12),
+        id="all-three",
+    ),
+]
+
+
+@pytest.mark.parametrize("options", OPTION_CASES)
+@pytest.mark.parametrize("dialect", ["biscuit", "bismark"])
+def test_call_filters_match_truth(
+    biscuit_dataset, bismark_dataset, sim_embedding, options, dialect
+) -> None:
+    """Each option changes exactly the reads and calls the simulation says.
+
+    Checked for both tag dialects: the filters work from the read's bases,
+    qualities and position, whichever way its call was obtained.
+    """
+    dataset = biscuit_dataset if dialect == "biscuit" else bismark_dataset
+    default = _expected(dataset, sim_embedding)
+    expected = _expected(dataset, sim_embedding, **options)
+    assert expected != default  # the option has something to do
+
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=dataset.bam_path,
+        genome_methylation_embedding=sim_embedding,
+        **options,
+    )
+    _assert_matches_truth(result, expected, sim_embedding)
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_call_filters_combine_with_the_read_filters(
+    biscuit_dataset, sim_embedding, threads
+) -> None:
+    """Masking and quality filtering happen before the fragment-level filters."""
+    options: dict = dict(mask_3prime=15, min_base_quality=30, keep_improper_pairs=True)
+    expected = _expected(
+        biscuit_dataset,
+        sim_embedding,
+        non_converted_threshold=3,
+        em_overconversion_min_cpgs=3,
+        **options,
+    )
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path,
+        genome_methylation_embedding=sim_embedding,
+        threads=threads,
+        **_filter_kwargs(3, 3),
+        **options,
+    )
+    _assert_matches_truth(result, expected, sim_embedding)
+
+
+@pytest.mark.parametrize("mask_3prime", [0, 8, 30])
+def test_single_end_3prime_mask_matches_truth(
+    sim_embedding, tmp_path, mask_3prime
+) -> None:
+    """Single-end reads are masked from their own 3' end, on either strand."""
+    dataset = simulate_bam(
+        str(tmp_path),
+        TEST_FASTA,
+        aligner="biscuit",
+        chromosomes=CHROMOSOMES,
+        fragments_per_chromosome=80,
+        seed=SEED,
+        paired=False,
+    )
+    assert {read.bottom_strand for read in dataset.reads} == {True, False}
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=dataset.bam_path,
+        genome_methylation_embedding=sim_embedding,
+        mask_3prime=mask_3prime,
+    )
+    _assert_matches_truth(
+        result,
+        _expected(dataset, sim_embedding, mask_3prime=mask_3prime),
+        sim_embedding,
+    )
+
+
+def test_3prime_mask_only_removes_calls(biscuit_dataset, sim_embedding) -> None:
+    """Masking turns calls into -1; it never adds, moves or flips an entry."""
+    plain = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path, genome_methylation_embedding=sim_embedding
+    )
+    masked = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path,
+        genome_methylation_embedding=sim_embedding,
+        mask_3prime=20,
+    )
+    assert masked.matrix.shape == plain.matrix.shape
+    assert np.array_equal(masked.matrix.row, plain.matrix.row)
+    assert np.array_equal(masked.matrix.col, plain.matrix.col)
+    assert np.array_equal(masked.tlen, plain.tlen)
+    changed = masked.matrix.data != plain.matrix.data
+    assert changed.any()
+    assert (masked.matrix.data[changed] == -1).all()
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_extraction_stats_match_truth(biscuit_dataset, sim_embedding, threads) -> None:
+    """The counts returned with the result equal what the simulation holds."""
+    mask_3prime = 10
+    result = functions.extract_methylation_data_from_bam(
+        input_bam=biscuit_dataset.bam_path,
+        genome_methylation_embedding=sim_embedding,
+        mask_3prime=mask_3prime,
+        threads=threads,
+    )
+
+    # Reads dropped, and CpG observations discarded, counted read by read.
+    used = dropped = observations = not_intact = low_quality = 0
+    for read in biscuit_dataset.reads:
+        if read.mapq < 20 or read.duplicate:
+            continue
+        if read.improper:
+            dropped += 1
+            continue
+        used += 1
+        quality_filtered = dict(_read_calls(read))
+        for position, state in read.cpg_calls:
+            observations += 1
+            if state == -1:
+                not_intact += 1
+            elif quality_filtered[position] == -1:
+                low_quality += 1
+
+    # Fragments holding the calls of both mates: both pass the read filters
+    # and both cover a CpG.
+    contributing = collections.Counter(
+        (read.chrom, read.name)
+        for read in biscuit_dataset.reads
+        if _passes_read_filters(read, 20) and read.cpg_calls
+    )
+    two_mates = sum(count == 2 for count in contributing.values())
+
+    # Masked calls are counted per fragment: those the fragment would
+    # otherwise have had.
+    masked = 0
+    for chrom in CHROMOSOMES:
+        unmasked_fragments = _expected_fragments(biscuit_dataset, sim_embedding, chrom)
+        masked_fragments = _expected_fragments(
+            biscuit_dataset, sim_embedding, chrom, mask_3prime=mask_3prime
+        )
+        for (_, before, _), (_, after, _) in zip(unmasked_fragments, masked_fragments):
+            masked += sum(
+                before[column] != -1 and after[column] == -1 for column in before
+            )
+
+    checks = _expected_strand_check(biscuit_dataset, sim_embedding)
+    assert result.stats == {
+        "reads_used": used,
+        "reads_dropped_improper_pair": dropped,
+        "reads_without_md": 0,
+        "fragments_from_two_mates": two_mates,
+        "cpg_observations": observations,
+        "cpg_not_intact": not_intact,
+        # The simulator's only error at a CpG's other base is the other
+        # strand's conversion product, which is not a reference mismatch.
+        "cpg_reference_mismatch": result.stats["cpg_reference_mismatch"],
+        "cpg_low_base_quality": low_quality,
+        "cpg_masked_3prime": masked,
+        "strand_contradictions": checks[0],
+        "strand_checks": checks[1],
+    }
+    assert 0 < result.stats["cpg_reference_mismatch"] < not_intact
+    assert min(dropped, not_intact, low_quality, masked, two_mates) > 0
+    assert two_mates < result.matrix.shape[0] < used
+
+
+def test_cli_call_filter_options_match_truth(
+    biscuit_dataset, sim_embedding, tmp_path
+) -> None:
+    """The CLI options reach the extractor and are recorded in the output."""
+    output_dir = tmp_path / "out"
+    result = CliRunner().invoke(
+        __main__.main,
+        [
+            "--input-path",
+            biscuit_dataset.bam_path,
+            "--reference-fasta",
+            TEST_FASTA,
+            "--genome-name",
+            "simulated_options",
+            "--expected-chromosomes",
+            ",".join(CHROMOSOMES),
+            "--output-dir",
+            str(output_dir),
+            "--min-base-quality",
+            "0",
+            "--mask-3prime",
+            "12",
+            "--keep-improper-pairs",
+            "--quality-limit",
+            "10",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Base quality:  not filtered" in result.output
+    assert "Read pairs:    improper pairs kept" in result.output
+    assert "3' end mask:   12 bp" in result.output
+
+    rows, cols, data, tlens = _expected(
+        biscuit_dataset,
+        sim_embedding,
+        quality_limit=10,
+        min_base_quality=0,
+        mask_3prime=12,
+        keep_improper_pairs=True,
+    )
+    npz_path = str(output_dir / "simulated.biscuit.methylation.npz")
+    matrix = scipy.sparse.load_npz(npz_path)
+    assert matrix.row.tolist() == rows
+    assert matrix.col.tolist() == cols
+    assert matrix.data.tolist() == data
+
+    metadata = read_npz_metadata(npz_path)
+    assert metadata is not None
+    assert metadata["input_bam"] == "simulated.biscuit.bam"
+    assert metadata["aligner"] == "Biscuit/bwameth (YD tag)"
+    filters = metadata["filters"]
+    assert filters["min_mapping_quality"] == 10
+    assert filters["min_base_quality"] == 0
+    assert filters["mask_3prime"] == 12
+    assert filters["keep_improper_pairs"] is True
+    stats = metadata["extraction_stats"]
+    assert stats["reads_dropped_improper_pair"] == 0
+    assert stats["cpg_low_base_quality"] == 0
+    assert stats["cpg_masked_3prime"] > 0
+    assert stats["cpg_observations"] > len(data)  # mates overlap
+
+    inspected = CliRunner().invoke(inspect_main, [npz_path])
+    assert inspected.exit_code == 0, inspected.output
+    assert "MAPQ >= 10" in inspected.output
+    assert "improper pairs kept" in inspected.output
+    assert "3' end mask (12 bp)" in inspected.output
+    assert "base quality" not in inspected.output  # filter was off
+
+
+def test_cli_records_the_default_filters(biscuit_dataset, tmp_path) -> None:
+    """Defaults are written out too, so a file says how it was made."""
+    output_dir = tmp_path / "out"
+    result = CliRunner().invoke(
+        __main__.main,
+        [
+            "--input-path",
+            biscuit_dataset.bam_path,
+            "--reference-fasta",
+            TEST_FASTA,
+            "--genome-name",
+            "simulated_defaults",
+            "--expected-chromosomes",
+            ",".join(CHROMOSOMES),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Base quality:  >= 20" in result.output
+    assert "Read pairs:    proper pairs only" in result.output
+    assert "3' end mask" not in result.output
+    assert "read(s) not in a proper pair" in result.output
+    assert "No call (-1):" in result.output
+
+    npz_path = str(output_dir / "simulated.biscuit.methylation.npz")
+    metadata = read_npz_metadata(npz_path)
+    assert metadata is not None
+    assert metadata["filters"]["min_mapping_quality"] == 20
+    assert metadata["filters"]["min_base_quality"] == 20
+    assert metadata["filters"]["mask_3prime"] == 0
+    assert metadata["filters"]["keep_improper_pairs"] is False
+    assert metadata["extraction_stats"]["reads_dropped_improper_pair"] > 0
+    assert metadata["extraction_stats"]["cpg_low_base_quality"] > 0
+
+    inspected = CliRunner().invoke(inspect_main, [npz_path])
+    assert "MAPQ >= 20" in inspected.output
+    assert "base quality >= 20" in inspected.output
+    assert "improper pairs dropped" in inspected.output

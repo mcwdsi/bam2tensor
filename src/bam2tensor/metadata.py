@@ -15,7 +15,14 @@ Output format versions:
       "fragment"``). The two mates of a read pair are combined into a
       single row, and every read is decoded on the base that carries its
       call, so both strands of every aligner dialect are represented.
-      ``tlen`` holds the fragment length (absolute BAM TLEN).
+      ``tlen`` holds the fragment length (absolute BAM TLEN). A value of
+      ``-1`` means the fragment covers the CpG but there is no usable
+      call: the read does not show an intact CpG there, the base
+      carrying the call is below the minimum base quality, the CpG lies
+      in the masked 3' end of the fragment, or the two mates disagree.
+      Rows follow the order of ``expected_chromosomes``, as the columns
+      do. The ``filters`` and ``extraction_stats`` metadata entries
+      record the settings used and what they discarded.
     - **1** — Files with no ``format_version`` entry (releases up to and
       including 2.8). One row per read. For Bismark BAMs both mates were
       separate rows and calls from bottom-strand alignments were recorded

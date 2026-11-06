@@ -428,3 +428,99 @@ def test_cli_warns_about_real_mistagged_pairs(tmp_path) -> None:
     assert result.exit_code == 0, result.output
     assert "WARNING: 245 of 1,542 CpGs (15.9%)" in result.output
     assert "Errors" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Call filters on real output
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param(dict(mask_3prime=10), id="mask-10"),
+        pytest.param(dict(mask_3prime=40), id="mask-40"),
+        pytest.param(dict(min_base_quality=38), id="base-quality-38"),
+        pytest.param(dict(min_base_quality=0, keep_improper_pairs=True), id="lenient"),
+    ],
+)
+def test_call_filters_keep_the_two_aligners_identical(
+    sarscov2_embedding, options
+) -> None:
+    """Masking and base-quality filtering act the same on both dialects.
+
+    They work from each read's position, bases and qualities rather than
+    from how its call was obtained, so the Bismark and bwa-meth alignments
+    of the same reads still give one matrix.
+    """
+    from_bismark = functions.extract_methylation_data_from_bam(
+        input_bam=SARSCOV2_BISMARK_BAM,
+        genome_methylation_embedding=sarscov2_embedding,
+        **options,
+    )
+    from_bwameth = functions.extract_methylation_data_from_bam(
+        input_bam=SARSCOV2_BWAMETH_BAM,
+        genome_methylation_embedding=sarscov2_embedding,
+        **options,
+    )
+    for attribute in ("row", "col", "data"):
+        assert np.array_equal(
+            getattr(from_bismark.matrix, attribute),
+            getattr(from_bwameth.matrix, attribute),
+        ), attribute
+    # (The fragment lengths are not compared: tlen is the BAM's TLEN, and
+    # for the 70 pairs here whose mates extend past each other Bismark
+    # reports the outer span of the two alignments where bwa reports the
+    # distance between their starting ends. The 3' end mask must not depend
+    # on that, which is what the "mask" cases check.)
+    for key in (
+        "reads_dropped_improper_pair",
+        "cpg_observations",
+        "cpg_not_intact",
+        "cpg_reference_mismatch",
+        "cpg_low_base_quality",
+        "cpg_masked_3prime",
+    ):
+        assert from_bismark.stats[key] == from_bwameth.stats[key], key
+
+
+@pytest.mark.parametrize("bam_path", ALIGNMENTS)
+def test_3prime_mask_on_real_pairs(bam_path, sarscov2_embedding) -> None:
+    """Masking only turns calls into -1, and only near fragment 3' ends."""
+    plain = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path, genome_methylation_embedding=sarscov2_embedding
+    )
+    masked = functions.extract_methylation_data_from_bam(
+        input_bam=bam_path,
+        genome_methylation_embedding=sarscov2_embedding,
+        mask_3prime=10,
+    )
+    assert masked.matrix.shape == plain.matrix.shape
+    assert np.array_equal(masked.matrix.row, plain.matrix.row)
+    assert np.array_equal(masked.matrix.col, plain.matrix.col)
+    changed = masked.matrix.data != plain.matrix.data
+    assert (masked.matrix.data[changed] == -1).all()
+    # A few percent of calls: 10 bases out of fragments a few hundred long.
+    assert 0.01 < changed.mean() < 0.15
+    assert masked.stats["cpg_masked_3prime"] >= int(changed.sum())
+
+
+def test_real_mistagged_reads_lose_their_unmethylated_calls(
+    sarscov2_embedding,
+) -> None:
+    """In a mis-tagged read an unmethylated CpG is recorded as no data.
+
+    The conversion shows on the CpG's other base, so the read does not show
+    an intact CpG there. The reads do match the reference, so this is not
+    mistaken for a wrong reference.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = functions.extract_methylation_data_from_bam(
+            input_bam=SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM,
+            genome_methylation_embedding=sarscov2_embedding,
+        )
+    stats = result.stats
+    assert stats["strand_contradictions"] == 245
+    assert stats["cpg_not_intact"] >= 245
+    assert stats["cpg_reference_mismatch"] < 0.05 * stats["cpg_observations"]

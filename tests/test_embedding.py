@@ -416,11 +416,11 @@ def test_window_size_does_not_affect_the_cache() -> None:
     assert emb.total_cpg_sites == TOTAL_CPG_SITES
 
 
-def test_cache_from_release_2_8_still_loads(capsys) -> None:
-    """A cache in the 2.8 on-disk format is accepted, not regenerated.
+def test_cache_without_fasta_stamp_is_validated_by_hash(capsys) -> None:
+    """A cache with no FASTA size / modification-time stamp is still usable.
 
-    That format carries a ``window_size`` entry and no FASTA size /
-    modification-time stamp; it is validated by content hash instead.
+    It is validated by content hash instead. A leftover ``window_size``
+    entry, as older releases wrote, is ignored.
     """
     _make_embedding("legacy_format")
     cache_path = "legacy_format.cache.json.gz"
@@ -917,7 +917,10 @@ def test_verbose_reports_stamp_match(tmp_path, capsys) -> None:
     capsys.readouterr()
 
     _make_embedding("stamp_verbose", fasta_source=fasta, verbose=True)
-    assert "FASTA size and modification time match the cache" in capsys.readouterr().out
+    assert (
+        "FASTA path, size and modification time match the cache"
+        in capsys.readouterr().out
+    )
 
 
 # -- Column lookup without a per-position table -----------------------------------
@@ -950,7 +953,11 @@ def test_every_cpg_maps_to_its_own_column(test_embeddings) -> None:
 
 
 def test_columns_follow_expected_chromosome_order() -> None:
-    """Column order follows expected_chromosomes, not FASTA record order."""
+    """Columns, and the stored CpG data, follow expected_chromosomes.
+
+    The FASTA has chr1 before chr3; the requested order wins. Output rows
+    follow the order of ``cpg_sites_dict``, so rows and columns agree.
+    """
     emb = _make_embedding(
         "reordered", expected_chromosomes=["chr3", "chr1"], skip_cache=True
     )
@@ -966,8 +973,8 @@ def test_columns_follow_expected_chromosome_order() -> None:
         "chr1",
         emb.cpg_sites_dict["chr1"][0],
     )
-    # The CpG data itself is still stored in FASTA record order.
-    assert list(emb.cpg_sites_dict) == ["chr1", "chr3"]
+    assert list(emb.cpg_sites_dict) == ["chr3", "chr1"]
+    assert list(emb.chromosome_lengths) == ["chr3", "chr1"]
 
 
 @pytest.mark.parametrize("offset", [-1, 1])
@@ -998,3 +1005,120 @@ def test_embedding_has_no_per_position_lookup_table(test_embeddings) -> None:
     positions_only = pickle.dumps(embedding_obj.cpg_sites_dict)
     whole = pickle.dumps(embedding_obj)
     assert len(whole) < 1.2 * len(positions_only)
+
+
+# -- Chromosome lengths, duplicate names, caches built from another file ---------
+
+
+def _fasta_lengths() -> dict[str, int]:
+    """Sequence lengths of the bundled FASTA, read independently of the embedding."""
+    lengths: dict[str, int] = {}
+    name = None
+    with open(TEST_FASTA) as fasta:
+        for line in fasta:
+            if line.startswith(">"):
+                name = line[1:].split()[0]
+                lengths[name] = 0
+            elif name is not None:
+                lengths[name] += len(line.strip())
+    return lengths
+
+
+def test_chromosome_lengths_are_recorded(test_embeddings) -> None:
+    """Fresh, cache-writing and cache-loading embeddings all know the lengths."""
+    expected = {name: _fasta_lengths()[name] for name in CHROMOSOMES}
+    assert all(length > 0 for length in expected.values())
+    for embedding_obj in test_embeddings:
+        assert embedding_obj.chromosome_lengths == expected
+        assert list(embedding_obj.chromosome_lengths) == CHROMOSOMES
+        # Every CpG lies within its chromosome.
+        for name, sites in embedding_obj.cpg_sites_dict.items():
+            assert sites[-1] < expected[name]
+
+
+def test_cache_without_chromosome_lengths_is_regenerated(capsys) -> None:
+    """A cache that cannot say how long its chromosomes are is rebuilt.
+
+    The lengths are what a BAM header is checked against, so a cache
+    lacking them would silently disable that check.
+    """
+    _make_embedding("no_lengths")
+    cache_path = "no_lengths.cache.json.gz"
+    data = _read_cache(cache_path)
+    del data["chromosome_lengths"]
+    _write_cache(cache_path, data)
+    capsys.readouterr()
+
+    emb = _make_embedding("no_lengths")
+
+    captured = capsys.readouterr()
+    assert "Discarding stale embedding cache" in captured.out
+    assert "no chromosome lengths" in captured.out
+    assert emb.chromosome_lengths == {
+        name: _fasta_lengths()[name] for name in CHROMOSOMES
+    }
+    assert _read_cache(cache_path)["chromosome_lengths"] == emb.chromosome_lengths
+
+
+@pytest.mark.parametrize("skip_cache", [True, False])
+def test_duplicate_expected_chromosomes_are_rejected(skip_cache) -> None:
+    """A chromosome listed twice would be given two column ranges."""
+    with pytest.raises(ValueError, match="listed more than once: chr1"):
+        _make_embedding(
+            "duplicated",
+            expected_chromosomes=["chr1", "chr2", "chr1"],
+            skip_cache=skip_cache,
+        )
+    assert not os.path.exists("duplicated.cache.json.gz")
+
+
+def test_cache_not_reused_for_another_fasta_of_the_same_size_and_age(
+    tmp_path, hash_calls, capsys
+) -> None:
+    """Two different references that share a size and a modification time.
+
+    Regression: size and modification time were trusted whatever file they
+    belonged to, so the second FASTA was given the first one's CpG index.
+    References copied or unpacked together routinely share both.
+    """
+    first = tmp_path / "first.fa"
+    second = tmp_path / "second.fa"
+    first.write_text(">chr1\nAACGAACGAA\n")
+    second.write_text(">chr1\nAACGAANNAA\n")  # same length, one CpG fewer
+    old = time.time_ns() - 3600 * 10**9
+    for fasta in (first, second):
+        os.utime(fasta, ns=(old, old))
+    assert first.stat().st_size == second.stat().st_size
+    assert first.stat().st_mtime_ns == second.stat().st_mtime_ns
+
+    emb1 = _make_embedding(
+        "same_stamp", expected_chromosomes=["chr1"], fasta_source=str(first)
+    )
+    assert emb1.cpg_sites_dict["chr1"] == [3, 7]
+    capsys.readouterr()
+
+    emb2 = _make_embedding(
+        "same_stamp", expected_chromosomes=["chr1"], fasta_source=str(second)
+    )
+    captured = capsys.readouterr()
+    assert emb2.cpg_sites_dict["chr1"] == [3]
+    assert "Discarding stale embedding cache" in captured.out
+    assert "SHA-256 mismatch" in captured.out
+    # Hashed to stamp the first cache, to compare the second FASTA with it,
+    # and to stamp the cache rebuilt from the second.
+    assert hash_calls == [str(first), str(second), str(second)]
+
+
+def test_cache_fast_path_recognises_the_same_file_by_another_name(
+    tmp_path, hash_calls
+) -> None:
+    """A symlink to the cached FASTA is the same file: no re-hash."""
+    fasta = _private_fasta(tmp_path, age_seconds=3600)
+    link = tmp_path / "link.fa"
+    os.symlink(fasta, link)
+
+    _make_embedding("stamp_link", fasta_source=fasta)
+    emb = _make_embedding("stamp_link", fasta_source=str(link))
+
+    assert emb.total_cpg_sites == TOTAL_CPG_SITES
+    assert hash_calls == [fasta]

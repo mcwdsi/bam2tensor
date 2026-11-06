@@ -40,7 +40,7 @@ uv run mypy src
 
 ```
 src/bam2tensor/
-  __init__.py      # Package version (2.8)
+  __init__.py      # Package version (3.0)
   __main__.py      # Click CLI entry point (bam2tensor command)
   inspect.py       # Inspect CLI entry point (bam2tensor-inspect command)
   embedding.py     # GenomeMethylationEmbedding class (FASTA parsing, CpG indexing)
@@ -115,7 +115,8 @@ xdoctest validates code examples in docstrings. Important rules:
 - Tests are in `tests/` directory
 - Test fixtures: `test.bam`, `test.bam.bai`, `test_fasta.fa`
 - **Tests run in a temporary working directory** (autouse fixture in `tests/conftest.py`), so cache files and default outputs never land in the checkout. Refer to bundled fixtures through the absolute-path constants in `tests/paths.py` (`TEST_BAM`, `TEST_BAM_INDEX`, `TEST_FASTA`), never by a path relative to the repo root.
-- **`test.bam` barely overlaps `test_fasta.fa`** (real hg38 alignments vs. a 700 kb reference; one read survives extraction). For tests that need many reads with known answers, use `tests/simulate.py`: `simulate_bam()` writes an indexed Biscuit- or Bismark-style BAM from `test_fasta.fa` and returns the per-read ground truth. See `tests/test_simulated.py`.
+- **`test.bam` was not aligned to `test_fasta.fa`**: it is real bwa-meth EM-seq on hg38 chr1, and `test_fasta.fa` is an unrelated 700 kb stand-in. The extractor rightly refuses the combination (chromosome lengths differ), so tests that pair them are plumbing smoke tests only and must pass `allow_length_mismatch=True` (API) or `--allow-length-mismatch` (CLI); one read survives extraction. For tests that need many reads with known answers, use `tests/simulate.py`: `simulate_bam()` writes an indexed Biscuit- or Bismark-style BAM from `test_fasta.fa` and returns the per-read ground truth, including base qualities, improper-pair flags and fragment ends. `tests/test_simulated.py` states the extractor's contract in `_expected()` / `_read_calls()`; when a rule changes, change it there rather than loosening assertions.
+- **Hand-built BAMs must be self-consistent**: the `@SQ` length must equal the FASTA sequence length, and a read only yields a call where it shows an intact CpG (the helpers in `tests/test_fragments.py` fill in the CpG's other base for you).
 - **Real aligner output** lives in `tests/data/sarscov2/` (paths in `tests/paths.py`): the same 557 read pairs aligned by Bismark and by bwa-meth. Simulated and hand-built reads only encode what we *believe* aligners write; when changing strand or tag handling, `tests/test_real_aligners.py` is the check against what they actually write. The two files must always extract to identical matrices.
 - Run tests across Python 3.11, 3.12, 3.13 via nox
 - Coverage reporting enabled (minimum threshold: 10%)
@@ -125,21 +126,22 @@ xdoctest validates code examples in docstrings. Important rules:
 
 ### Data Structure
 - Output: scipy sparse COO matrix saved as .npz
-- Rows = sequenced DNA fragments: the two mates of a read pair merged into one row; a single-end read (or a read whose mate is filtered, missing, on another chromosome, or more than 100 kb away) is its own row. Ordered by chromosome, then by where each fragment's first CpG-covering read appears in the BAM.
+- Rows = sequenced DNA fragments: the two mates of a read pair merged into one row; a single-end read (or a read whose mate is filtered, missing, on another chromosome, or more than 100 kb away) is its own row. Ordered by chromosome (in `expected_chromosomes` order, the same as the columns: `cpg_sites_dict` is kept in that order whatever the FASTA's), then by where each fragment's first CpG-covering read appears in the BAM.
+- Mates are matched by query name **and** position: a waiting fragment is keyed by (name, its first mate's start, the start it expects of the second), so unrelated pairs sharing a name are not merged.
 - Columns = CpG sites (ordered by genomic position, determined by reference genome)
-- Values: 1 (methylated), 0 (unmethylated), -1 (no data: indel/SNV at the CpG, or the two mates disagreeing)
+- Values: 1 (methylated), 0 (unmethylated), -1 (covered but no usable call: the read does not show an intact CpG there, the base carrying the call is below the minimum base quality, the CpG is in the masked 3' end of the fragment, or the two mates disagree)
 - A CpG covered by both mates is stored once: agreement keeps the call, a lone call beats -1, a methylated/unmethylated disagreement becomes -1 (`_merge_mate_calls`).
 - `0` (unmethylated) is stored explicitly; uncovered CpGs are absent. Never densify to test for unmethylated calls, and never call `eliminate_zeros()`.
 - **Output format version**: `metadata.json` carries `format_version` (currently 2) and `row_unit` (`fragment`), defined in `metadata.py` (`OUTPUT_FORMAT_VERSION`). Files without it are format 1 (one row per read). Bump `OUTPUT_FORMAT_VERSION`, and describe the new version in the `metadata.py` docstring and README, whenever the meaning of rows, columns, values or `tlen` changes.
-- Each .npz file contains a `metadata.json` entry with provenance info (genome name, version, CpG index CRC32, expected chromosomes). Read via `bam2tensor.metadata.read_npz_metadata()`.
+- Each .npz file contains a `metadata.json` entry with provenance info (genome name, version, CpG index CRC32, expected chromosomes, input BAM name, detected aligner, every filter setting under `filters`, and the counts in `extraction_stats`). Read via `bam2tensor.metadata.read_npz_metadata()`. A new extraction option must be recorded there.
 - Each .npz file contains a `tlen.npy` entry with the length of each fragment (absolute BAM TLEN, 0 if unknown) as int32, one per row. Read via `bam2tensor.metadata.read_npz_tlen()`. Returns `None` for files from older versions.
-- `extract_methylation_data_from_bam()` returns an `ExtractionResult` NamedTuple with `.matrix` (sparse COO) and `.tlen` (numpy int32 array).
+- `extract_methylation_data_from_bam()` returns an `ExtractionResult` NamedTuple with `.matrix` (sparse COO), `.tlen` (numpy int32 array) and `.stats` (dict of counts: reads dropped as improper pairs, CpG observations, and how many were discarded for each reason).
 - Matrix values are int64 and row/col indices int32 (int64 only past 2**31 rows or columns). These dtypes are part of the on-disk format; keep them stable.
 - Column of a CpG = `embedding.chromosome_offsets[chrom]` + its index in the sorted `embedding.cpg_sites_dict[chrom]`. There is deliberately no per-position lookup dict (it cost several GB for a human genome); use `genomic_position_to_embedding()` (a binary search) or the index arithmetic directly.
 - The `cpg_index_crc32` stored in every output is defined over the text `chrom\tpos1,pos2,...` per chromosome joined by newlines. Its value is pinned by a test; never change the definition.
 
 ### Methylation Strand Detection
-A fragment derives from the top or the bottom strand of the original DNA, and **both mates of a pair report on that same strand** (they carry the same strand tag). BAM stores reads in top-strand orientation, so for a CpG whose C is at reference position p:
+A fragment derives from the top or the bottom strand of the original DNA, and **both mates of a proper pair report on that same strand** (they carry the same strand tag; in real bwa-meth output the only pairs whose mates differ are improper pairs, which are dropped by default). BAM stores reads in top-strand orientation, so for a CpG whose C is at reference position p:
 - top-strand fragment: the call is on the C at p (C = methylated, T = unmethylated)
 - bottom-strand fragment: the call is on the G at p + 1 (G = methylated, A = unmethylated)
 
@@ -148,13 +150,26 @@ Every read is decoded at its fragment's informative base. The read's own alignme
 - Biscuit aligner: `YD` tag (f = top, r = bottom); call read from the base
 - bwameth aligner: `YD` tag (same format as Biscuit)
 - gem3/blueprint aligner: `XB` tag (C = top, G = bottom); not verified against real gem3 output
-- The strand tag is trusted. It is correct for directional libraries. bwa-meth mis-tags most complementary-strand (CTOT/CTOB) pairs of a non-directional library, so such data decodes wrongly (every CpG in a mis-tagged read is called methylated).
-- **Strand-tag check**: for reads decoded from their bases, the extractor also looks at each CpG's *other* base, which the read's strand never converts (G for top-strand reads, C for bottom-strand). A conversion product there (A at the G, T at the C) contradicts the tag. Counts are summed per BAM; `--verbose` prints them, and a `RuntimeWarning` fires when more than 2% of at least 1,000 checked CpGs contradict (`_STRAND_CONTRADICTION_WARNING_RATE`, `_STRAND_CHECK_MIN_CPGS` in `functions.py`). It warns only; it cannot repair the calls. `tests/data/sarscov2/bwameth_nondirectional.bam` holds real mis-tagged pairs (15.9% contradictions); `bwameth.bam` holds only directional pairs (0%).
+- The strand tag is trusted. It is correct for directional libraries. bwa-meth mis-tags most complementary-strand (CTOT/CTOB) pairs of a non-directional library, so such data decodes wrongly: a mis-tagged read is read on the base its strand never converts, which always looks methylated; its unmethylated CpGs fail the intact-CpG rule (below) and become -1, so only methylated calls survive and methylation is overstated.
+- **Strand-tag check**: for reads decoded from their bases, the extractor also looks at each CpG's *other* base, which the read's strand never converts (G for top-strand reads, C for bottom-strand), wherever the read covers it with sufficient base quality. A conversion product there (A at the G, T at the C) contradicts the tag. Counts are summed per BAM; `--verbose` prints them, and a `RuntimeWarning` fires when more than 2% of at least 1,000 checked CpGs contradict (`_STRAND_CONTRADICTION_WARNING_RATE`, `_STRAND_CHECK_MIN_CPGS` in `functions.py`). It warns only; it cannot repair the calls. `tests/data/sarscov2/bwameth_nondirectional.bam` holds real mis-tagged pairs (15.9% contradictions); `bwameth.bam` holds only directional pairs (0%); real human EM-seq (`tests/test.bam` against hg38 chr1) sits at 0.70%.
+
+### Which Calls Are Kept
+These rules are applied per read from its own bases and qualities, identically for the Bismark (`XM`) and base-decoding paths. That identity is what keeps the Bismark and bwa-meth fixtures extracting to the same matrix, so never implement one of them for a single path.
+- **Proper pairs only**: a paired read without the proper-pair flag (0x2) is skipped (`keep_improper_pairs` / `--keep-improper-pairs` keeps it). Single-end reads are kept.
+- **Intact CpG**: a call is kept only if the CpG's other base, where the read covers it, is present, adjacent in the read, and the reference base (G after the C for top-strand reads, C before the G for bottom-strand reads). Otherwise -1. This removes the false "unmethylated" call a CpA/TpG variant molecule produces (its lone C is converted as non-CpG). A variant on the informative base itself (top-strand read of a TpG molecule) is indistinguishable from conversion and is *not* caught.
+- **Base quality**: the informative base needs Phred >= `min_base_quality` (default 20; 0 = off; reads without stored qualities are not filtered). Measured on real EM-seq: bases below Q20 are wrong 14.7% of the time, against under 1% above.
+- **3' end mask** (`mask_3prime`, default 0 = off): calls within N bases of the 3' end of the fragment's original strand become -1, to remove end-repair fill-in (unmethylated dCTP). The end is the right-hand end for top-strand fragments (the reverse-aligned mate's reference end) and the left-hand end for bottom-strand ones (the forward-aligned mate's start). It is applied per fragment when the row is emitted, from the mates' own coordinates (`_three_prime_end`, `emit()` in `_extract_chromosome`), because TLEN differs between aligners when mates extend past each other (Bismark: outer span; bwa: distance between 5' ends). TLEN is only the fallback for a top-strand forward read whose mate is unavailable; single-end reads use their own end. Off by default because pipelines often trim for this before alignment.
+- **EM over-conversion filter** ignores -1 entries: they neither count towards `min_cpgs` nor shield a fragment.
+- **Majority warnings**: the proper-pair and base-quality filters rely on the BAM's own flag and qualities. A `RuntimeWarning` fires when either discards more than half of at least 1,000 otherwise usable reads / calls (`_FILTER_MAJORITY_WARNING_RATE`, `_FILTER_MAJORITY_MIN_COUNT`), so an aligner that never sets 0x2, or placeholder qualities, cannot silently empty the output.
+
+### Reference Check
+- `extract_methylation_data_from_bam()` raises `ValueError` when a chromosome's length in the BAM header differs from `embedding.chromosome_lengths` (`check_chromosome_lengths`); `allow_length_mismatch` / `--allow-length-mismatch` turns it off.
+- A `RuntimeWarning` fires when more than 10% of at least 1,000 decoded CpGs mismatch the reference (`_REFERENCE_MISMATCH_WARNING_RATE`, `_REFERENCE_MISMATCH_MIN_CPGS`). The count (`cpg_reference_mismatch`) leaves out CpGs whose only fault is the other strand's conversion product at the other base, which belong to the strand-tag check. Real data: 2.1%; a wrong reference of the same length: 78%.
 
 ### Dependencies
 - pysam: BAM file handling
 - biopython: FASTA parsing
-- scipy: Sparse matrices
+- scipy: Sparse matrices (>= 1.15, for `scipy.sparse.get_index_dtype`)
 - click: CLI framework
 - numpy, tqdm
 
@@ -231,15 +246,15 @@ When working on this codebase as an AI coding agent:
 - **Darglint long strictness**: Every parameter, return value, and explicitly-raised exception must be documented in Google-style docstrings
 - **Do not add exceptions to `Raises:`** that are not explicitly raised with a `raise` statement in that function
 - **Run `nox --session=xdoctest`** to validate docstring examples; use `# xdoctest: +SKIP` for examples requiring external files
-- **Test BAM**: `tests/test.bam` uses chromosomes `chr1`, `chr2`, `chr3` matching `tests/test_fasta.fa`
+- **Test BAM**: `tests/test.bam` has `chr1`, `chr2`, `chr3` in its header, like `tests/test_fasta.fa`, but with hg38 lengths: it was not aligned to that FASTA (see Testing Guidelines)
 - **Creating test BAMs**: Follow the pattern in `tests/test_duplication.py` (pysam to create BAMs, then `pysam.index()`) for hand-built edge cases; use `tests/simulate.py` when you need realistic read sets with known truth
-- **CLI exit status**: `bam2tensor` exits 1 if any BAM in the run failed (it still processes the others). Check the exit status, not just the output, when scripting it
+- **CLI exit status**: `bam2tensor` exits 1 if any BAM in the run failed (it still processes the others), and refuses up front a run in which two BAMs would share one output file (same file name under `--output-dir`). `bam2tensor-inspect` exits 1 if any file could not be read. Check the exit status, not just the output, when scripting them
 - **Dependency management**: Uses `uv` (not pip/poetry)
 - **Type checking**: mypy with `strict = false` but `check_untyped_defs = true`
 - **Do not modify** `noxfile.py` (excluded from ruff checks)
 - **New CLI options**: Add to both Click decorators and the `main()` function signature in `__main__.py`
 - **Output files** are written by `write_output()` in `__main__.py`: assembled under a temporary name and renamed into place, so a partial `.methylation.npz` never exists. Keep any new entry added to the archive inside that function.
-- **Cache files**: `.cache.json.gz` files are written to the current working directory. A cache is validated against the FASTA by size + modification time when those are trustworthy, and by SHA-256 otherwise; it is rejected (and regenerated) on a version or content mismatch, and raises `ValueError` if it was built for a different chromosome list
+- **Cache files**: `.cache.json.gz` files are written to the current working directory. A cache is validated against the FASTA by path + size + modification time when those are trustworthy (same resolved path as the cache was built from), and by SHA-256 otherwise; it is rejected (and regenerated) on a version or content mismatch or if it lacks chromosome lengths, and raises `ValueError` if it was built for a different chromosome list. `expected_chromosomes` must not name a chromosome twice (`ValueError`)
 
 ### Using bam2tensor efficiently when invoked from an agent
 
