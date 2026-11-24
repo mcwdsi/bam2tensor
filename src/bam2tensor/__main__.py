@@ -667,13 +667,14 @@ def main(
             skip_count += 1
             continue
 
-        # Detect aligner
-        aligner = detect_aligner(input_bam)
-        print(f"  Aligner:       {aligner}")
-
-        # Extract
-        print("  Extracting methylation data...")
         try:
+            # Detect aligner. This is the first read of the BAM, so it sits
+            # inside the per-file error boundary: a truncated file fails here.
+            aligner = detect_aligner(input_bam)
+            print(f"  Aligner:       {aligner}")
+
+            # Extract
+            print("  Extracting methylation data...")
             # Record warnings raised during extraction (e.g. the non-converted
             # filter could not evaluate reads lacking an MD tag) so they are
             # shown with this BAM's report rather than as a raw Python warning.

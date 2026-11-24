@@ -23,6 +23,7 @@ import gzip
 import os
 import shutil
 import urllib.request
+import uuid
 from pathlib import Path
 
 from tqdm import tqdm
@@ -189,11 +190,15 @@ def download_reference(genome_name: str, verbose: bool = False) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     fasta_path = cache_dir / f"{genome_name}.fa"
-    # Work in per-process temporary files and rename into place at the end.
-    # (Plain names rather than tempfile.mkstemp, so the final FASTA keeps the
-    # normal umask-derived permissions and shared caches stay readable.)
-    tmp_gz_path = cache_dir / f"{genome_name}.fa.gz.{os.getpid()}.part"
-    tmp_fasta_path = cache_dir / f"{genome_name}.fa.{os.getpid()}.part"
+    # Work in temporary files unique to this call and rename into place at
+    # the end. The PID alone is not enough: two threads of one process
+    # downloading the same genome would share (and delete) each other's
+    # files. (Plain names rather than tempfile.mkstemp, so the final FASTA
+    # keeps the normal umask-derived permissions and shared caches stay
+    # readable.)
+    tmp_token = f"{os.getpid()}.{uuid.uuid4().hex}"
+    tmp_gz_path = cache_dir / f"{genome_name}.fa.gz.{tmp_token}.part"
+    tmp_fasta_path = cache_dir / f"{genome_name}.fa.{tmp_token}.part"
 
     url = genome_info["url"]
     description = genome_info["description"]
