@@ -1,7 +1,9 @@
 """Test cases for the reference module."""
 
 import gzip
+import concurrent.futures
 import os
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -314,3 +316,45 @@ def test_download_reference_downloads_to_temporary_name(tmp_path):
         assert seen["dest"].endswith(".part")
         assert seen["final_exists_during_download"] is False
         assert result.exists()
+
+
+def test_download_reference_concurrent_calls_in_one_process(tmp_path):
+    """Two threads downloading the same genome do not share temporary files.
+
+    Regression (issue #102): the temporary names held only the genome and the
+    process ID, so one call's cleanup deleted the other call's download.
+    The schedule is forced: both downloads are written, then the second
+    caller waits inside its downloader until the first call has finished
+    (and cleaned up) before it goes on to decompress.
+    """
+    both_downloaded = threading.Barrier(2)
+    first_finished = threading.Event()
+    state = threading.local()
+    destinations = []
+
+    def fake_urlretrieve(url, dest, reporthook=None):
+        destinations.append(dest)
+        _create_fake_gzipped_fasta(dest)
+        both_downloaded.wait(timeout=30)
+        if state.index == 1:
+            assert first_finished.wait(timeout=30)
+        return dest, {}
+
+    def run(index):
+        state.index = index
+        try:
+            return download_reference("hg38")
+        finally:
+            if index == 0:
+                first_finished.set()
+
+    with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
+        with patch("bam2tensor.reference.urllib.request.urlretrieve", fake_urlretrieve):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(run, index) for index in range(2)]
+                results = [future.result() for future in futures]
+
+        assert len(set(destinations)) == 2
+        assert results[0] == results[1]
+        assert results[0].read_text().startswith(">chr1")
+        assert _genome_dir_contents(tmp_path) == ["hg38.fa"]

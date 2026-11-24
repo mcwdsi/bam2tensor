@@ -1752,3 +1752,29 @@ def test_bundled_bam_needs_the_length_check_turned_off() -> None:
         functions.extract_methylation_data_from_bam(
             input_bam=TEST_BAM, genome_methylation_embedding=TEST_EMBEDDING
         )
+
+
+def test_detect_aligner_closes_bam_when_reading_fails(monkeypatch):
+    """An I/O error while sampling reads propagates, with the handle closed.
+
+    Regression (issue #101): only opening the BAM was guarded; an OSError
+    raised by iteration (a truncated BGZF stream) left the file open.
+    """
+
+    class FailingBam:
+        closed = False
+
+        def fetch(self):
+            raise OSError("truncated file")
+
+        def close(self):
+            self.closed = True
+
+    bam = FailingBam()
+    monkeypatch.setattr(
+        "bam2tensor.functions.pysam.AlignmentFile", lambda *args, **kwargs: bam
+    )
+
+    with pytest.raises(OSError, match="truncated file"):
+        detect_aligner("any.bam")
+    assert bam.closed

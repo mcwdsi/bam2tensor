@@ -17,6 +17,8 @@ from tests.paths import (
     SARSCOV2_BISMARK_BAM,
     SARSCOV2_BWAMETH_BAM,
     SARSCOV2_BWAMETH_NONDIRECTIONAL_BAM,
+    SARSCOV2_CHROMOSOME,
+    SARSCOV2_FASTA,
     TESTS_DIR,
     TEST_BAM,
     TEST_BAM_INDEX,
@@ -819,6 +821,52 @@ def test_main_continues_past_failing_bams(runner: CliRunner, tmp_path) -> None:
     assert "Processed:     1 BAM(s)" in result.output
     assert "Errors:        2" in result.output
     assert result.exit_code == 1
+
+
+def test_main_continues_past_truncated_bam(runner: CliRunner, tmp_path) -> None:
+    """A truncated BAM is reported; the BAMs after it are still processed.
+
+    Regression (issue #101): aligner detection, the first read of each BAM,
+    ran outside the per-file error handling, so the OSError from a truncated
+    file ended the run before the remaining files and the summary.
+    """
+    bam_dir = tmp_path / "bams"
+    bam_dir.mkdir()
+    for name in ("first", "second"):
+        shutil.copy(SARSCOV2_BISMARK_BAM, bam_dir / f"{name}.bam")
+        shutil.copy(SARSCOV2_BISMARK_BAM + ".bai", bam_dir / f"{name}.bam.bai")
+    # Truncate whichever file the run reaches first; its index is intact.
+    bad, good = __main__.get_input_bams(str(bam_dir))
+    with open(bad, "rb") as handle:
+        content = handle.read()
+    with open(bad, "wb") as handle:
+        handle.write(content[:-10])
+    output_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        __main__.main,
+        [
+            "--input-path",
+            str(bam_dir),
+            "--reference-fasta",
+            SARSCOV2_FASTA,
+            "--genome-name",
+            "truncated",
+            "--expected-chromosomes",
+            SARSCOV2_CHROMOSOME,
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert result.exit_code == 1
+    assert "ERROR: " in result.output
+    assert "Processed:     1 BAM(s)" in result.output
+    assert "Errors:        1" in result.output
+    assert os.listdir(output_dir) == [
+        os.path.basename(good).replace(".bam", ".methylation.npz")
+    ]
 
 
 def test_main_exit_status_zero_when_all_bams_succeed(

@@ -339,30 +339,37 @@ def detect_aligner(input_bam: str, sample_size: int = 1000) -> str:
     Returns:
         A human-readable string identifying the detected aligner, such as
         ``"Bismark (XM tag)"`` or ``"Unknown"``.
+
+    Note:
+        A BAM that cannot be opened at all (missing file or index) is
+        reported as ``"Unknown (could not open BAM)"``. An I/O error while
+        opening or reading it (for example ``OSError`` from a truncated
+        file) propagates to the caller, with the file handle closed.
     """
     try:
         bam = pysam.AlignmentFile(input_bam, "rb", require_index=True)  # type: ignore
     except (FileNotFoundError, ValueError):
         return "Unknown (could not open BAM)"
 
-    checked = 0
-    for read in bam.fetch():
-        if read.flag & _SKIP_FLAGS:
-            continue
-        if read.has_tag("XM"):
-            bam.close()
-            return "Bismark (XM tag)"
-        if read.has_tag("YD"):
-            bam.close()
-            return "Biscuit/bwameth (YD tag)"
-        if read.has_tag("XB"):
-            bam.close()
-            return "gem3/Blueprint (XB tag)"
-        checked += 1
-        if checked >= sample_size:
-            break
+    # Reading can fail part-way (a truncated BGZF stream raises OSError):
+    # the handle is closed either way and the error is left to the caller.
+    try:
+        checked = 0
+        for read in bam.fetch():
+            if read.flag & _SKIP_FLAGS:
+                continue
+            if read.has_tag("XM"):
+                return "Bismark (XM tag)"
+            if read.has_tag("YD"):
+                return "Biscuit/bwameth (YD tag)"
+            if read.has_tag("XB"):
+                return "gem3/Blueprint (XB tag)"
+            checked += 1
+            if checked >= sample_size:
+                break
+    finally:
+        bam.close()
 
-    bam.close()
     return "Unknown (no XM/YD/XB tags found)"
 
 

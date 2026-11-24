@@ -42,6 +42,7 @@ import gzip
 import json
 import os
 import time
+import uuid
 import warnings
 import zlib
 
@@ -349,9 +350,11 @@ class GenomeMethylationEmbedding:
         - genome_name: The genome identifier
         - fasta_source: Path to the original FASTA file
         - fasta_sha256: SHA-256 of the FASTA file bytes (for cache validation)
-        - fasta_size, fasta_mtime_ns: Size and modification time of the
-          FASTA when the cache was written, and fasta_stat_time_ns, the
-          time they were recorded (a fast path for cache validation)
+        - fasta_realpath, fasta_device, fasta_inode, fasta_ctime_ns,
+          fasta_size, fasta_mtime_ns: Identity, size and times of the file
+          that fasta_source resolved to when the cache was written, and
+          fasta_stat_time_ns, the time they were recorded (a fast path
+          for cache validation)
         - bam2tensor_version: Version that produced this cache
         - total_cpg_sites: Total CpG count across all included chromosomes
         - expected_chromosomes: List of included chromosomes
@@ -383,6 +386,13 @@ class GenomeMethylationEmbedding:
             "genome_name": self.genome_name,
             "fasta_source": self.fasta_source,
             "fasta_sha256": compute_fasta_sha256(self.fasta_source),
+            # The file the path led to when the cache was built. A symlink
+            # can be pointed elsewhere later, so the path alone does not
+            # identify it; nor do size and mtime, which a copy can preserve.
+            "fasta_realpath": os.path.realpath(self.fasta_source),
+            "fasta_device": fasta_stat.st_dev,
+            "fasta_inode": fasta_stat.st_ino,
+            "fasta_ctime_ns": fasta_stat.st_ctime_ns,
             "fasta_size": fasta_stat.st_size,
             "fasta_mtime_ns": fasta_stat.st_mtime_ns,
             "fasta_stat_time_ns": fasta_stat_time_ns,
@@ -396,9 +406,10 @@ class GenomeMethylationEmbedding:
         if self.verbose:
             print(f"\tSaving embedding to cache: {self.cache_file}")
         # Write-then-rename: os.replace() is atomic, so readers only ever see
-        # a complete cache. The PID keeps concurrent writers (e.g. array jobs
-        # sharing a working directory) from clobbering each other's temp file.
-        tmp_file = f"{self.cache_file}.{os.getpid()}.tmp"
+        # a complete cache. A name unique to this call keeps concurrent
+        # writers (array jobs sharing a working directory, or threads of one
+        # process) from clobbering each other's temp file.
+        tmp_file = f"{self.cache_file}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         try:
             with gzip.open(tmp_file, "wt", compresslevel=3, encoding="utf-8") as f:
                 json.dump(cache_data, f)
@@ -425,18 +436,19 @@ class GenomeMethylationEmbedding:
         FASTA parse and overwrites the stale cache on save.
 
         The FASTA is identified by its SHA-256. Hashing a multi-gigabyte
-        reference on every run is slow, so the cache also records the
-        FASTA's path, size and modification time: when the cache was
-        built from the file at this same path and its size and
-        modification time still match — and the FASTA had not been
+        reference on every run is slow, so the cache also records which
+        file it was built from: the resolved path, device, inode, size,
+        modification time and change time, all taken when the cache was
+        written. When the current ``fasta_source`` still leads to that
+        same file and none of these differ — and the FASTA had not been
         modified within a couple of seconds of the cache being written,
         when a rewrite could go unnoticed — the file is taken to be
-        unchanged and is not re-read. Otherwise (a different path, the
-        file was replaced, was copied without preserving its timestamp,
-        or the cache predates this stamp) the SHA-256 is recomputed and
-        compared. Size and modification time are only evidence that *one*
-        file has not changed; two different references can share both, so
-        a FASTA at another path is always identified by its contents.
+        unchanged and is not re-read. Otherwise (a different path, a
+        symlink that now points elsewhere, a file that was replaced even
+        with its size and timestamps preserved, a copy, or a cache that
+        predates these fields) the SHA-256 is recomputed and compared.
+        Size and modification time alone are never enough: two different
+        references can share both.
 
         A cache that is valid but was built for a *different chromosome
         list* is not silently replaced: the same genome name is being
@@ -500,12 +512,17 @@ class GenomeMethylationEmbedding:
         # stamp that a later rewrite could share its timestamp.
         fasta_stat = os.stat(self.fasta_source)
         stamp_time_ns = cache_data.get("fasta_stat_time_ns")
-        cached_fasta_source = cache_data.get("fasta_source")
         fasta_unchanged = (
-            # The same file, not merely one of the same size and age.
-            isinstance(cached_fasta_source, str)
-            and os.path.realpath(cached_fasta_source)
-            == os.path.realpath(self.fasta_source)
+            # The same file, not merely one of the same size and age: the
+            # path must still lead to the file recorded when the cache was
+            # built (a symlink may have been pointed elsewhere since), and
+            # that file must not have been replaced (a new file has another
+            # inode, and its change time cannot be set back by a copy that
+            # preserves the modification time).
+            cache_data.get("fasta_realpath") == os.path.realpath(self.fasta_source)
+            and cache_data.get("fasta_device") == fasta_stat.st_dev
+            and cache_data.get("fasta_inode") == fasta_stat.st_ino
+            and cache_data.get("fasta_ctime_ns") == fasta_stat.st_ctime_ns
             and cache_data.get("fasta_size") == fasta_stat.st_size
             and cache_data.get("fasta_mtime_ns") == fasta_stat.st_mtime_ns
             and isinstance(stamp_time_ns, int)
@@ -513,7 +530,7 @@ class GenomeMethylationEmbedding:
         )
         if fasta_unchanged:
             if self.verbose:
-                print("\tFASTA path, size and modification time match the cache.")
+                print("\tFASTA file identity, size and times match the cache.")
         else:
             # Otherwise the contents decide.
             cached_fasta_sha256 = cache_data.get("fasta_sha256")

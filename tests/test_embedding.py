@@ -520,6 +520,11 @@ def test_cache_stamps_provenance() -> None:
     assert data["fasta_size"] == fasta_stat.st_size
     assert data["fasta_mtime_ns"] == fasta_stat.st_mtime_ns
     assert abs(data["fasta_stat_time_ns"] - time.time_ns()) < 60 * 10**9
+    # ...and which file that was, so a later change of file is noticed.
+    assert data["fasta_realpath"] == os.path.realpath(TEST_FASTA)
+    assert data["fasta_device"] == fasta_stat.st_dev
+    assert data["fasta_inode"] == fasta_stat.st_ino
+    assert data["fasta_ctime_ns"] == fasta_stat.st_ctime_ns
 
 
 def test_cache_rejected_on_fasta_sha256_mismatch(capsys) -> None:
@@ -917,9 +922,8 @@ def test_verbose_reports_stamp_match(tmp_path, capsys) -> None:
     capsys.readouterr()
 
     _make_embedding("stamp_verbose", fasta_source=fasta, verbose=True)
-    assert (
-        "FASTA path, size and modification time match the cache"
-        in capsys.readouterr().out
+    assert "FASTA file identity, size and times match the cache" in (
+        capsys.readouterr().out
     )
 
 
@@ -1122,3 +1126,99 @@ def test_cache_fast_path_recognises_the_same_file_by_another_name(
 
     assert emb.total_cpg_sites == TOTAL_CPG_SITES
     assert hash_calls == [fasta]
+
+
+# -- The cache is tied to one file, not to one path (issue #100) -----------------
+
+
+def _two_references_with_one_stamp(tmp_path):
+    """Two different FASTAs sharing a size and an (old) modification time."""
+    first = tmp_path / "first.fa"
+    second = tmp_path / "second.fa"
+    first.write_text(">chr1\nAACGAACGAA\n")
+    second.write_text(">chr1\nAACGAANNAA\n")  # same length, one CpG fewer
+    old = time.time_ns() - 3600 * 10**9
+    for fasta in (first, second):
+        os.utime(fasta, ns=(old, old))
+    assert first.stat().st_size == second.stat().st_size
+    assert first.stat().st_mtime_ns == second.stat().st_mtime_ns
+    return first, second
+
+
+def test_cache_not_reused_after_symlink_is_pointed_at_another_fasta(
+    tmp_path, hash_calls, capsys
+) -> None:
+    """A reference symlink retargeted to a FASTA of the same size and age.
+
+    Regression: the cached path and the current path were both resolved at
+    load time, so after the retarget both led to the new file, its size and
+    modification time matched, and the old reference's CpG index was reused.
+    """
+    first, second = _two_references_with_one_stamp(tmp_path)
+    reference = tmp_path / "reference.fa"
+    reference.symlink_to(first)
+
+    emb1 = _make_embedding(
+        "retargeted", expected_chromosomes=["chr1"], fasta_source=str(reference)
+    )
+    assert emb1.cpg_sites_dict["chr1"] == [3, 7]
+    capsys.readouterr()
+
+    reference.unlink()
+    reference.symlink_to(second)
+    emb2 = _make_embedding(
+        "retargeted", expected_chromosomes=["chr1"], fasta_source=str(reference)
+    )
+
+    assert emb2.cpg_sites_dict["chr1"] == [3]
+    assert "SHA-256 mismatch" in capsys.readouterr().out
+    assert len(hash_calls) == 3  # stamp, compare, stamp the rebuilt cache
+
+
+def test_cache_not_reused_after_fasta_is_replaced_keeping_its_timestamp(
+    tmp_path, hash_calls, capsys
+) -> None:
+    """Another file moved over the same path, size and mtime preserved.
+
+    This is what ``cp -p`` / ``rsync -t`` followed by a rename does.
+    """
+    first, second = _two_references_with_one_stamp(tmp_path)
+
+    emb1 = _make_embedding(
+        "replaced", expected_chromosomes=["chr1"], fasta_source=str(first)
+    )
+    assert emb1.cpg_sites_dict["chr1"] == [3, 7]
+    capsys.readouterr()
+
+    stamp = first.stat()
+    os.replace(second, first)
+    assert first.stat().st_size == stamp.st_size
+    assert first.stat().st_mtime_ns == stamp.st_mtime_ns
+    emb2 = _make_embedding(
+        "replaced", expected_chromosomes=["chr1"], fasta_source=str(first)
+    )
+
+    assert emb2.cpg_sites_dict["chr1"] == [3]
+    assert "SHA-256 mismatch" in capsys.readouterr().out
+    assert len(hash_calls) == 3
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    ["fasta_realpath", "fasta_device", "fasta_inode", "fasta_ctime_ns"],
+)
+def test_cache_without_file_identity_is_verified_by_content(
+    tmp_path, hash_calls, missing_key
+) -> None:
+    """A cache written before the file identity was recorded is re-hashed."""
+    fasta = _private_fasta(tmp_path, age_seconds=3600)
+    _make_embedding("no_identity", fasta_source=fasta)
+    cache_path = "no_identity.cache.json.gz"
+    data = _read_cache(cache_path)
+    del data[missing_key]
+    _write_cache(cache_path, data)
+
+    emb = _make_embedding("no_identity", fasta_source=fasta)
+
+    assert emb.total_cpg_sites == TOTAL_CPG_SITES
+    assert hash_calls == [fasta, fasta]  # still valid, but by its contents

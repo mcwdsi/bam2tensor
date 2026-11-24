@@ -254,7 +254,7 @@ When working on this codebase as an AI coding agent:
 - **Do not modify** `noxfile.py` (excluded from ruff checks)
 - **New CLI options**: Add to both Click decorators and the `main()` function signature in `__main__.py`
 - **Output files** are written by `write_output()` in `__main__.py`: assembled under a temporary name and renamed into place, so a partial `.methylation.npz` never exists. Keep any new entry added to the archive inside that function.
-- **Cache files**: `.cache.json.gz` files are written to the current working directory. A cache is validated against the FASTA by path + size + modification time when those are trustworthy (same resolved path as the cache was built from), and by SHA-256 otherwise; it is rejected (and regenerated) on a version or content mismatch or if it lacks chromosome lengths, and raises `ValueError` if it was built for a different chromosome list. `expected_chromosomes` must not name a chromosome twice (`ValueError`)
+- **Cache files**: `.cache.json.gz` files are written to the current working directory. A cache is validated against the FASTA by file identity (resolved path, device, inode, change time, all recorded when the cache was written) + size + modification time when all of those still match, and by SHA-256 otherwise (so a retargeted symlink or a replaced file is always re-hashed); it is rejected (and regenerated) on a version or content mismatch or if it lacks chromosome lengths, and raises `ValueError` if it was built for a different chromosome list. `expected_chromosomes` must not name a chromosome twice (`ValueError`)
 
 ### Using bam2tensor efficiently when invoked from an agent
 
