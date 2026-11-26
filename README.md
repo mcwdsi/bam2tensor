@@ -3,6 +3,7 @@
 **Author:** [Nick Semenkovich](https://nick.semenkovich.com/) (semenko@alum.mit.edu)
 
 [![PyPI](https://img.shields.io/pypi/v/bam2tensor.svg)][pypi status]
+[![Bioconda](https://img.shields.io/conda/vn/bioconda/bam2tensor.svg)][bioconda]
 [![Status](https://img.shields.io/pypi/status/bam2tensor.svg)][pypi status]
 [![Python Version](https://img.shields.io/pypi/pyversions/bam2tensor)][pypi status]
 [![License](https://img.shields.io/pypi/l/bam2tensor)][license]
@@ -16,6 +17,7 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 [pypi status]: https://pypi.org/project/bam2tensor/
+[bioconda]: https://bioconda.github.io/recipes/bam2tensor/README.html
 [documentation]: https://mcwdsi.github.io/bam2tensor
 [tests]: https://github.com/mcwdsi/bam2tensor/actions?workflow=Tests
 [coverage]: https://htmlpreview.github.io/?https://github.com/mcwdsi/bam2tensor/blob/python-coverage-comment-action-data/htmlcov/index.html
@@ -98,6 +100,12 @@ Core dependencies are automatically installed:
 
 ```bash
 pip install bam2tensor
+```
+
+### From Bioconda
+
+```bash
+conda install -c conda-forge -c bioconda bam2tensor
 ```
 
 ### From Source
